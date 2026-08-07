@@ -1,0 +1,16 @@
+{
+  "client_id": "https://rpietzsch.github.io/ctbx/oauth/client-metadata.json",
+  "client_name": "ctbx",
+  "client_uri": "https://rpietzsch.github.io/ctbx/",
+  "redirect_uris": [
+    "https://rpietzsch.github.io/ctbx/oauth/callback.html",
+    "http://localhost:5173/ctbx/oauth/callback.html",
+    "http://127.0.0.1:5173/ctbx/oauth/callback.html",
+    "http://localhost:4173/ctbx/oauth/callback.html",
+    "http://127.0.0.1:4173/ctbx/oauth/callback.html"
+  ],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none",
+  "application_type": "web"
+}

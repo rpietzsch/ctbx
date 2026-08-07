@@ -1,0 +1,53 @@
+{
+  "name": "ctbx",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-only PWA chat client for multiple LLM providers with remote MCP support",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.33",
+    "@ai-sdk/google": "^4.0.36",
+    "@ai-sdk/openai": "^4.0.33",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@openrouter/ai-sdk-provider": "^3.0.0",
+    "ai": "^7.0.55",
+    "dompurify": "^3.4.13",
+    "idb": "^8.0.3",
+    "marked": "^18.0.9",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router": "^8.3.0",
+    "zod": "^4.4.3",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.3",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
+    "globals": "^17.9.0",
+    "jsdom": "^30.0.1",
+    "msw": "^2.15.0",
+    "prettier": "^3.9.6",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.66.0",
+    "vite": "^8.2.1",
+    "vite-plugin-pwa": "^1.3.0",
+    "vitest": "^4.1.10"
+  }
+}

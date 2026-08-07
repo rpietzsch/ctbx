@@ -1,0 +1,122 @@
+# ctbx task runner — https://taskfile.dev
+#
+# Single entry point for lifecycle, test and build operations, shared by local
+# development, documentation and CI. See tasks/spec.md §11 for the contract.
+#
+#   task            list available targets
+#   task setup      install dependencies
+#   task dev        run the dev server
+#   task check      pre-push gate
+#   task ci         what GitHub Actions runs
+
+version: '3'
+
+vars:
+  # Must match `base` in vite.config.ts and the manifest scope/start_url.
+  BASE_PATH: /ctbx/
+  DEV_PORT: 5173
+  DIST_DIR: dist
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  # --------------------------------------------------------------------- setup
+
+  setup:
+    desc: Install dependencies and browsers
+    cmds:
+      - npm ci || npm install
+      - npx playwright install --with-deps chromium
+
+  # ----------------------------------------------------------------- lifecycle
+
+  dev:
+    desc: Run the Vite dev server (http://localhost:{{.DEV_PORT}}{{.BASE_PATH}})
+    cmds:
+      - npx vite --port {{.DEV_PORT}} --strictPort
+
+  build:
+    desc: Production build to {{.DIST_DIR}}/ (includes PWA assets)
+    cmds:
+      - npx tsc --noEmit
+      - npx vite build
+
+  preview:
+    desc: Serve the production build at the real base path
+    deps: [build]
+    cmds:
+      - npx vite preview --port 4173 --strictPort
+
+  clean:
+    desc: Remove build output, coverage and caches
+    cmds:
+      - rm -rf {{.DIST_DIR}} coverage .vite node_modules/.vite playwright-report test-results
+
+  # ---------------------------------------------------------------------- test
+
+  test:
+    desc: Run unit and component tests once
+    cmds:
+      - npx vitest run
+
+  test:watch:
+    desc: Run unit and component tests in watch mode
+    cmds:
+      - npx vitest
+
+  test:coverage:
+    desc: Run tests with a coverage report
+    cmds:
+      - npx vitest run --coverage
+
+  test:e2e:
+    desc: Run Playwright end-to-end tests against the production build
+    deps: [build]
+    cmds:
+      - npx playwright test
+
+  # --------------------------------------------------------------------- gates
+
+  typecheck:
+    desc: Type-check without emitting
+    cmds:
+      - npx tsc --noEmit
+
+  lint:
+    desc: Lint sources
+    cmds:
+      - npx eslint . --max-warnings 0
+
+  lint:fix:
+    desc: Lint sources and apply fixes
+    cmds:
+      - npx eslint . --fix
+
+  format:
+    desc: Format sources
+    cmds:
+      - npx prettier --write .
+
+  format:check:
+    desc: Verify formatting
+    cmds:
+      - npx prettier --check .
+
+  check:
+    desc: Pre-push gate — typecheck, lint, format and unit tests
+    cmds:
+      - task: typecheck
+      - task: lint
+      - task: format:check
+      - task: test
+
+  ci:
+    desc: Full CI pipeline — check, build and end-to-end tests
+    cmds:
+      - task: check
+      - task: build
+      - task: test:e2e

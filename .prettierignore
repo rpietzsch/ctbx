@@ -1,0 +1,11 @@
+dist
+coverage
+node_modules
+playwright-report
+test-results
+package-lock.json
+
+# Markdown is owned by markdownlint (MD013 80 cols, MD049 underscore emphasis).
+# Prettier reflows to 100 and rewrites emphasis, so the two fight over every file.
+*.md
+
