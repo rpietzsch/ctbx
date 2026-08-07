@@ -4,7 +4,7 @@ import { mcpServerStore, removeMcpServer, upsertMcpServer } from '@/config/store
 import { useStore } from '@/storage/useStore';
 import { createServerConfig } from '@/mcp/manager';
 import { buildServerConfig } from '@/mcp/server-form';
-import { diagnoseConnection, type Diagnosis } from '@/mcp/diagnostics';
+import type { Diagnosis } from '@/mcp/diagnostics';
 import type { ConnectionSnapshot, ConnectionState } from '@/mcp/connection';
 import { mcpManager } from '@/state/chat';
 import { Badge, Button, Card, ErrorNote, Field, Input } from '@/ui/primitives';
@@ -94,10 +94,13 @@ function ServerCard({
   snapshot: ConnectionSnapshot | undefined;
   onEdit: () => void;
 }) {
-  const [diagnosis, setDiagnosis] = useState<Diagnosis>();
   const [busy, setBusy] = useState(false);
   const state = snapshot?.state ?? 'disconnected';
   const tools = snapshot?.tools ?? [];
+  // Read the diagnosis from the snapshot rather than local state: connect() and
+  // diagnose() both publish there, so the panel can never show a verdict from a
+  // probe that predates the current connection attempt.
+  const diagnosis: Diagnosis | undefined = snapshot?.diagnosis;
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -151,7 +154,14 @@ function ServerCard({
           )}
           <Button
             disabled={busy}
-            onClick={() => void run(async () => setDiagnosis(await diagnoseConnection(config.url)))}
+            onClick={() =>
+              void run(async () => {
+                // Diagnose through the connection so the probe carries the
+                // stored token; an anonymous probe always reports "needs auth".
+                // The result lands in the snapshot, which is what renders.
+                await mcpManager.get(config.id)?.diagnose();
+              })
+            }
           >
             Diagnose
           </Button>
@@ -175,12 +185,19 @@ function ServerCard({
         </ErrorNote>
       ) : null}
 
-      {snapshot?.grantedScopes ? (
+      {snapshot?.hasToken ? (
         <p className="text-xs text-fg-muted">
-          Granted scopes: <code>{snapshot.grantedScopes}</code>
+          Access token stored
+          {snapshot.grantedScopes ? (
+            <>
+              {' · scopes '}
+              <code>{snapshot.grantedScopes}</code>
+            </>
+          ) : null}
           {snapshot.tokenExpiresAt
-            ? ` · token expires ${new Date(snapshot.tokenExpiresAt).toLocaleTimeString()}`
+            ? ` · expires ${new Date(snapshot.tokenExpiresAt).toLocaleTimeString()}`
             : ''}
+          {state === 'needs-auth' ? ' — but the server did not accept it' : ''}
         </p>
       ) : null}
 

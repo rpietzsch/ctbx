@@ -6,6 +6,7 @@ import type { McpServerConfig } from '@/config/schema';
 import { defineStore } from '@/storage/local';
 import { safeParser } from '@/config/schema';
 import { diagnoseConnection, type Diagnosis } from './diagnostics';
+import { mcpEndpointCorsRemedy } from './cors-remedy';
 import type { McpToolDescriptor, McpToolResult } from './tool-adapter';
 import {
   beginAuthorization,
@@ -53,6 +54,8 @@ export interface ConnectionSnapshot {
   issuer?: string;
   grantedScopes?: string;
   tokenExpiresAt?: number;
+  /** Whether an access token is stored, regardless of whether it works. */
+  hasToken?: boolean;
 }
 
 /**
@@ -159,6 +162,7 @@ export class McpConnection {
       this.emit({
         state: 'connected',
         error: undefined,
+        hasToken: tokens !== undefined,
         ...(issuer ? { issuer } : {}),
         ...(tokens?.scope ? { grantedScopes: tokens.scope } : {}),
         ...(tokens?.expiresAt ? { tokenExpiresAt: tokens.expiresAt } : {}),
@@ -210,24 +214,53 @@ export class McpConnection {
   }
 
   private async handleConnectFailure(error: unknown): Promise<void> {
+    const tokens = this.tokens();
+    const issuer = this.issuer();
+
     if (isUnauthorized(error)) {
       this.lastChallenge = { header: challengeHeaderOf(error) };
+    }
+
+    // Always re-probe, and carry the stored token when we have one. Probing
+    // unauthenticated would report "needs authorization" even for a token the
+    // server actively rejected — exactly the case the user needs told apart.
+    const diagnosis = await diagnoseConnection(this.config.url, this.fetchFn, {
+      ...(tokens?.access_token ? { token: tokens.access_token } : {}),
+      ...(issuer ? { issuer } : {}),
+    });
+
+    if (diagnosis.kind === 'needs-auth' || diagnosis.kind === 'token-rejected') {
       this.emit({
         state: 'needs-auth',
-        error: 'This server requires authorization.',
+        error: diagnosis.message,
+        diagnosis,
+        hasToken: tokens !== undefined,
       });
       return;
     }
 
-    const diagnosis = await diagnoseConnection(this.config.url, this.fetchFn);
-    if (diagnosis.kind === 'needs-auth') {
-      this.emit({ state: 'needs-auth', error: diagnosis.message, diagnosis });
+    // The probe says HTTP is fine, yet the MCP client could not connect. The
+    // probe only does the `initialize` POST; the MCP client goes on to send
+    // MCP-Protocol-Version (and Mcp-Session-Id) on every later request. If
+    // those are not in Access-Control-Allow-Headers, the browser blocks
+    // everything after the handshake — a server that looks healthy to a
+    // one-shot probe and is still unusable. Report the transport's own error
+    // rather than the misleading "ok" message.
+    if (diagnosis.kind === 'ok') {
+      this.emit({
+        state: 'error',
+        error: describeHandshakeOnlyFailure(error),
+        diagnosis,
+        hasToken: tokens !== undefined,
+      });
       return;
     }
+
     this.emit({
       state: 'error',
       error: diagnosis.message,
       diagnosis,
+      hasToken: tokens !== undefined,
     });
   }
 
@@ -393,6 +426,18 @@ export class McpConnection {
     return true;
   }
 
+  /** Probes the endpoint using whatever token is stored for this server. */
+  async diagnose(): Promise<Diagnosis> {
+    const tokens = this.tokens();
+    const issuer = this.issuer();
+    const diagnosis = await diagnoseConnection(this.config.url, this.fetchFn, {
+      ...(tokens?.access_token ? { token: tokens.access_token } : {}),
+      ...(issuer ? { issuer } : {}),
+    });
+    this.emit({ diagnosis, hasToken: tokens !== undefined });
+    return diagnosis;
+  }
+
   async callTool(name: string, args: unknown, signal?: AbortSignal): Promise<McpToolResult> {
     if (!this.client) throw new Error(`${this.config.name} is not connected.`);
     const result = await this.client.callTool(
@@ -438,6 +483,23 @@ export class McpConnection {
 function errorText(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
   return String(error);
+}
+
+/**
+ * Message for the case where a plain `initialize` POST succeeds but the MCP
+ * client still cannot connect. Almost always the post-handshake headers being
+ * blocked by CORS, so lead with that and include the transport's own error.
+ */
+export function describeHandshakeOnlyFailure(error: unknown): string {
+  return [
+    'The endpoint answered the initial handshake, but the MCP session could not be established.',
+    '',
+    'The usual cause is that the MCP client sends MCP-Protocol-Version — and Mcp-Session-Id once a session exists — on every request after the handshake. If those are not listed in Access-Control-Allow-Headers, the browser blocks them, so the first request appears to succeed and everything after it fails.',
+    '',
+    mcpEndpointCorsRemedy(),
+    '',
+    `Transport error: ${errorText(error)}`,
+  ].join('\n');
 }
 
 export function isUnauthorized(error: unknown): boolean {

@@ -74,6 +74,19 @@ export function extractResourceMetadataUrl(header: string | null | undefined): s
   return undefined;
 }
 
+/**
+ * Extracts the `error` parameter from a challenge — `invalid_token`,
+ * `insufficient_scope`, and so on. This is what distinguishes "you never
+ * authorized" from "your token was refused".
+ */
+export function extractChallengeError(header: string | null | undefined): string | undefined {
+  for (const challenge of parseWwwAuthenticate(header)) {
+    const value = challenge.params.error;
+    if (value) return value;
+  }
+  return undefined;
+}
+
 /** Extracts the authoritative `scope` challenge (spec §7.2 priority 1). */
 export function extractChallengeScope(header: string | null | undefined): string | undefined {
   for (const challenge of parseWwwAuthenticate(header)) {

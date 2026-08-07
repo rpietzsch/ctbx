@@ -17,10 +17,18 @@
  * network.
  */
 
-import { mcpEndpointCorsRemedy, NATIVE_CLIENT_NOTE } from './cors-remedy';
+import { mcpEndpointCorsRemedy, NATIVE_CLIENT_NOTE, tokenRejectedRemedy } from './cors-remedy';
+import { extractChallengeError } from './auth/discovery';
 
 export type DiagnosisKind =
-  'ok' | 'needs-auth' | 'cors' | 'network' | 'not-found' | 'server-error' | 'protocol';
+  | 'ok'
+  | 'needs-auth'
+  | 'token-rejected'
+  | 'cors'
+  | 'network'
+  | 'not-found'
+  | 'server-error'
+  | 'protocol';
 
 export interface Diagnosis {
   kind: DiagnosisKind;
@@ -40,6 +48,19 @@ export interface ProbeOutcome {
   wwwAuthenticateReadable?: boolean;
   /** True when `Mcp-Session-Id` was readable on a successful response. */
   sessionIdReadable?: boolean;
+  /**
+   * True when the probe carried an access token. Without this the diagnosis
+   * cannot distinguish "never authorized" from "token refused" — every probe
+   * looks like "needs authorization", which is useless precisely when the user
+   * has just finished authorizing.
+   */
+  tokenPresent?: boolean;
+  /** The `error` parameter from the challenge, e.g. `invalid_token`. */
+  challengeError?: string | undefined;
+  /** The MCP server's canonical URI, for the audience remedy. */
+  resource?: string;
+  /** The authorization server issuer, for a server-specific remedy. */
+  issuer?: string | undefined;
 }
 
 export const REQUIRED_EXPOSED_HEADERS = 'WWW-Authenticate, Mcp-Session-Id';
@@ -64,6 +85,18 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
   const status = outcome.status ?? 0;
 
   if (status === 401 || status === 403) {
+    // A token was sent and still bounced: this is no longer "needs auth".
+    if (outcome.tokenPresent) {
+      return {
+        kind: 'token-rejected',
+        message:
+          outcome.challengeError === undefined
+            ? 'The MCP server rejected the access token. Authorization completed, but the token is not accepted for this resource.'
+            : `The MCP server rejected the access token (${outcome.challengeError}). Authorization completed, but the token is not accepted for this resource.`,
+        remedy: tokenRejectedRemedy(outcome.resource ?? 'this MCP server', outcome.issuer),
+      };
+    }
+
     if (outcome.wwwAuthenticateReadable === false) {
       return {
         kind: 'needs-auth',
@@ -73,7 +106,10 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
           'The MCP server should add Access-Control-Expose-Headers: WWW-Authenticate so the client can read the resource_metadata hint and the required scopes.',
       };
     }
-    return { kind: 'needs-auth', message: 'The server requires authorization.' };
+    return {
+      kind: 'needs-auth',
+      message: 'The server requires authorization, and no access token is stored for it yet.',
+    };
   }
 
   if (status === 404) {
@@ -98,24 +134,36 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
     };
   }
 
+  // Wording matters here: this probe is a single `initialize` POST. It says
+  // nothing about whether a session can be maintained, so it must not claim to
+  // be "connected" — that reads as a contradiction next to a failed connection.
   if (outcome.sessionIdReadable === false) {
     return {
       kind: 'ok',
-      message: 'Connected, but the session header is not readable, so sessions cannot be resumed.',
+      message:
+        'The endpoint answered a single MCP initialize request, but Mcp-Session-Id is not readable, so sessions cannot be resumed.',
       remedy:
         'The MCP server should add Mcp-Session-Id to Access-Control-Expose-Headers to allow session resumption across reloads.',
     };
   }
 
-  return { kind: 'ok', message: 'The server responded correctly.' };
+  return { kind: 'ok', message: 'The endpoint answered a single MCP initialize request.' };
 }
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+export interface DiagnoseOptions {
+  /** Stored access token, so the probe reflects the authenticated state. */
+  token?: string | undefined;
+  /** Authorization server issuer, for a server-specific remedy. */
+  issuer?: string | undefined;
+}
+
 /** Runs the two probes and analyses the outcome. */
 export async function diagnoseConnection(
   url: string,
-  fetchFn: FetchLike = fetch
+  fetchFn: FetchLike = fetch,
+  options: DiagnoseOptions = {}
 ): Promise<Diagnosis> {
   const body = JSON.stringify({
     jsonrpc: '2.0',
@@ -128,21 +176,25 @@ export async function diagnoseConnection(
     },
   });
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+  };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+
   try {
-    const response = await fetchFn(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json, text/event-stream',
-      },
-      body,
-    });
+    const response = await fetchFn(url, { method: 'POST', headers, body });
+    const challenge = response.headers.get('WWW-Authenticate');
 
     return analyzeProbe({
       corsRequestSucceeded: true,
       status: response.status,
-      wwwAuthenticateReadable: response.headers.get('WWW-Authenticate') !== null,
+      wwwAuthenticateReadable: challenge !== null,
       sessionIdReadable: response.headers.get('Mcp-Session-Id') !== null,
+      tokenPresent: options.token !== undefined,
+      challengeError: extractChallengeError(challenge),
+      resource: url,
+      issuer: options.issuer,
     });
   } catch {
     let reachable: boolean;

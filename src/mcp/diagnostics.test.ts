@@ -31,6 +31,68 @@ describe('analyzeProbe', () => {
     expect(result.remedy).toContain('Access-Control-Expose-Headers: WWW-Authenticate');
   });
 
+  /**
+   * The distinction that matters after a user has just authorized: probing
+   * without the token reports "needs auth" for a token the server refused.
+   */
+  it('reports token-rejected when a token was sent and still bounced', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 401,
+      wwwAuthenticateReadable: true,
+      tokenPresent: true,
+      challengeError: 'invalid_token',
+      resource: 'https://mcp.example.com/mcp',
+    });
+    expect(result.kind).toBe('token-rejected');
+    expect(result.message).toContain('invalid_token');
+    expect(result.message).toMatch(/rejected the access token/i);
+  });
+
+  it('reports token-rejected even when the challenge names no error', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 401,
+      wwwAuthenticateReadable: true,
+      tokenPresent: true,
+    });
+    expect(result.kind).toBe('token-rejected');
+  });
+
+  it('explains audience binding in the token-rejected remedy', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 401,
+      tokenPresent: true,
+      resource: 'https://mcp.example.com/mcp',
+    });
+    expect(result.remedy).toMatch(/audience/i);
+    expect(result.remedy).toContain('https://mcp.example.com/mcp');
+  });
+
+  it('gives Keycloak-specific audience advice when the issuer is Keycloak', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 401,
+      tokenPresent: true,
+      resource: 'https://mcp.example.com/mcp',
+      issuer: 'https://host.example/auth/realms/cmem',
+    });
+    expect(result.remedy).toMatch(/RFC 8707/);
+    expect(result.remedy).toMatch(/audience mapper/i);
+  });
+
+  it('still reports needs-auth when no token was sent', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 401,
+      wwwAuthenticateReadable: true,
+      tokenPresent: false,
+    });
+    expect(result.kind).toBe('needs-auth');
+    expect(result.message).toMatch(/no access token is stored/i);
+  });
+
   it('treats 403 as needing authorization too', () => {
     expect(
       analyzeProbe({ corsRequestSucceeded: true, status: 403, wwwAuthenticateReadable: true }).kind
@@ -61,6 +123,18 @@ describe('analyzeProbe', () => {
     });
     expect(result.kind).toBe('ok');
     expect(result.remedy).toContain('Mcp-Session-Id');
+  });
+
+  /**
+   * The probe is one `initialize` POST. Claiming to be "connected" contradicts
+   * the error banner whenever the client failed on a later request.
+   */
+  it('never claims to be connected, since it only made one request', () => {
+    for (const sessionIdReadable of [true, false]) {
+      const result = analyzeProbe({ corsRequestSucceeded: true, status: 200, sessionIdReadable });
+      expect(result.message).not.toMatch(/^Connected/);
+      expect(result.message).toMatch(/answered a single MCP initialize request/i);
+    }
   });
 
   it('reports a clean connection with no remedy', () => {
@@ -115,6 +189,38 @@ describe('diagnoseConnection', () => {
     await expect(diagnoseConnection('https://mcp.example.com/mcp', fetchFn)).resolves.toMatchObject(
       { kind: 'network' }
     );
+  });
+
+  it('sends the stored token and reads the challenge error', async () => {
+    const fetchFn = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        new Response('', {
+          status: 401,
+          headers: {
+            'WWW-Authenticate':
+              'Bearer realm="x", error="invalid_token", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"',
+          },
+        })
+    );
+
+    const result = await diagnoseConnection('https://mcp.example.com/mcp', fetchFn, {
+      token: 'stored-token',
+      issuer: 'https://host.example/auth/realms/cmem',
+    });
+
+    const headers = (fetchFn.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer stored-token');
+    expect(result.kind).toBe('token-rejected');
+    expect(result.message).toContain('invalid_token');
+  });
+
+  it('sends no Authorization header when no token is stored', async () => {
+    const fetchFn = vi.fn(
+      async (_url: string, _init?: RequestInit) => new Response('', { status: 401 })
+    );
+    await diagnoseConnection('https://mcp.example.com/mcp', fetchFn);
+    const headers = (fetchFn.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
   });
 
   it('sends a real MCP initialize request', async () => {

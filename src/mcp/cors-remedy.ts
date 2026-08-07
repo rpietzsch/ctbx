@@ -35,6 +35,35 @@ export function authorizationServerCorsRemedy(url: string, origin = currentOrigi
 This looks like Keycloak. Keycloak answers the CORS preflight for any origin but then rejects the token request with 403 "Invalid origin" unless the origin is registered on the client. Add ${origin} to the client's "Web Origins", and ${origin}/ctbx/oauth/callback.html to its "Valid redirect URIs".`;
 }
 
+/**
+ * Remedy for a token the resource server refused (`error="invalid_token"`).
+ *
+ * The token exists, so this is no longer an authorization-flow problem — the
+ * MCP server looked at it and said no. By far the most common cause is audience
+ * binding: the MCP specification requires a resource server to verify the token
+ * was issued for *it*, and clients to send RFC 8707 `resource`. Keycloak does
+ * not implement RFC 8707 — it ignores the parameter — so unless an audience
+ * mapper is configured, the issued token's `aud` never names the MCP server and
+ * the check fails.
+ */
+export function tokenRejectedRemedy(resource: string, issuer?: string): string {
+  const keycloak = issuer !== undefined && looksLikeKeycloak(issuer);
+
+  const base = `The authorization server issued a token but the MCP server rejected it. The token is most likely missing the required audience or scope for ${resource}.`;
+
+  if (!keycloak) {
+    return `${base}
+
+MCP requires the access token's audience to identify the MCP server. Check that the authorization server honours the RFC 8707 "resource" parameter, or is otherwise configured to put ${resource} in the token's "aud" claim.`;
+  }
+
+  return `${base}
+
+This looks like Keycloak, which does not implement RFC 8707 resource indicators — it ignores the "resource" parameter ctbx sends, so the token's "aud" claim will not name the MCP server on its own.
+
+Fix it with an audience mapper: Client scopes → (a scope assigned to this client) → Mappers → Add mapper → By configuration → Audience, and set "Included Custom Audience" to ${resource}. Then confirm the resulting token's "aud" contains that value.`;
+}
+
 /** Remedy text for an MCP endpoint that a browser cannot use. */
 export function mcpEndpointCorsRemedy(origin = currentOrigin()): string {
   return `The MCP server must allow browser requests from ${origin}:
