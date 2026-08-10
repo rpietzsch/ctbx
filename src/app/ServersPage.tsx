@@ -1,11 +1,29 @@
 import { useEffect, useState } from 'react';
 import type { McpServerConfig } from '@/config/schema';
-import { mcpServerStore, removeMcpServer, upsertMcpServer } from '@/config/stores';
+import {
+  mcpServerStore,
+  preferencesStore,
+  removeMcpServer,
+  setMcpServerEnabled,
+  setToolAlwaysAllowed,
+  setToolCategoryAlwaysAllowed,
+  upsertMcpServer,
+} from '@/config/stores';
 import { useStore } from '@/storage/useStore';
 import { createServerConfig } from '@/mcp/manager';
 import { buildServerConfig } from '@/mcp/server-form';
 import type { Diagnosis } from '@/mcp/diagnostics';
 import type { ConnectionSnapshot, ConnectionState } from '@/mcp/connection';
+import { canonicalHeaderName } from '@/mcp/header-negotiation';
+import { alwaysAllowCategoryKey, alwaysAllowKey, type McpToolDescriptor } from '@/mcp/tool-adapter';
+import {
+  groupByCategory,
+  isBulkApprovable,
+  TOOL_CATEGORY_DESCRIPTION,
+  TOOL_CATEGORY_LABEL,
+  TOOL_CATEGORY_TONE,
+  type ToolCategory,
+} from '@/mcp/tool-categories';
 import { mcpManager } from '@/state/chat';
 import { Badge, Button, Card, ErrorNote, Field, Input } from '@/ui/primitives';
 
@@ -113,12 +131,21 @@ function ServerCard({
 
   return (
     <Card className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      {/*
+        Identity above, controls below — always. Letting the two share a row
+        when the IRI happens to be short made otherwise identical cards lay out
+        differently, which reads as a rendering bug rather than as one design.
+      */}
+      <div className="space-y-2">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h2 className="truncate font-medium">{config.name}</h2>
-            <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
-            {state === 'connected' ? (
+            {config.enabled ? (
+              <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
+            ) : (
+              <Badge tone="neutral">disabled</Badge>
+            )}
+            {config.enabled && state === 'connected' ? (
               <span className="text-xs text-fg-muted">
                 {tools.length} tool{tools.length === 1 ? '' : 's'}
               </span>
@@ -127,8 +154,23 @@ function ServerCard({
           <p className="truncate text-xs text-fg-muted">{config.url}</p>
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          {state === 'needs-auth' ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <label
+            className="flex items-center gap-1.5 text-xs text-fg-muted"
+            title="Disabling closes the connection and withdraws this server's tools from the chat."
+          >
+            <input
+              type="checkbox"
+              checked={config.enabled}
+              onChange={(event) => {
+                setMcpServerEnabled(config.id, event.target.checked);
+                mcpManager.sync();
+              }}
+            />
+            Enabled
+          </label>
+
+          {!config.enabled ? null : state === 'needs-auth' ? (
             <Button
               variant="primary"
               disabled={busy}
@@ -152,19 +194,21 @@ function ServerCard({
               Connect
             </Button>
           )}
-          <Button
-            disabled={busy}
-            onClick={() =>
-              void run(async () => {
-                // Diagnose through the connection so the probe carries the
-                // stored token; an anonymous probe always reports "needs auth".
-                // The result lands in the snapshot, which is what renders.
-                await mcpManager.get(config.id)?.diagnose();
-              })
-            }
-          >
-            Diagnose
-          </Button>
+          {config.enabled ? (
+            <Button
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  // Diagnose through the connection so the probe carries the
+                  // stored token; an anonymous probe always reports "needs auth".
+                  // The result lands in the snapshot, which is what renders.
+                  await mcpManager.get(config.id)?.diagnose();
+                })
+              }
+            >
+              Diagnose
+            </Button>
+          ) : null}
           <Button onClick={onEdit}>Edit</Button>
           <Button
             variant="ghost"
@@ -183,6 +227,17 @@ function ServerCard({
         <ErrorNote>
           <span className="whitespace-pre-wrap">{snapshot.error}</span>
         </ErrorNote>
+      ) : null}
+
+      {state === 'connected' && snapshot?.droppedHeaders?.length ? (
+        <p className="rounded-lg border border-border bg-surface-3 p-3 text-xs text-fg-muted">
+          Connected with {snapshot.droppedHeaders.map(canonicalHeaderName).join(' and ')} omitted —
+          this server's CORS policy does not accept{' '}
+          {snapshot.droppedHeaders.length === 1 ? 'it' : 'them'} from a browser. Everything works,
+          but the server should list{' '}
+          {snapshot.droppedHeaders.length === 1 ? 'that header' : 'those headers'} in
+          Access-Control-Allow-Headers.
+        </p>
       ) : null}
 
       {snapshot?.hasToken ? (
@@ -209,22 +264,111 @@ function ServerCard({
         </div>
       ) : null}
 
-      {tools.length > 0 ? (
-        <details>
-          <summary className="cursor-pointer text-xs text-fg-muted">Tool inventory</summary>
-          <ul className="mt-2 space-y-1.5">
-            {tools.map((tool) => (
-              <li key={tool.name} className="text-xs">
-                <code className="font-mono">{tool.name}</code>
-                {tool.description ? (
-                  <span className="text-fg-muted"> — {tool.description}</span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
+      {tools.length > 0 ? <ToolInventory serverId={config.id} tools={tools} /> : null}
     </Card>
+  );
+}
+
+/**
+ * The tool list, grouped by the risk category the server annotated, with
+ * pre-approval per tool and per category.
+ *
+ * Grouping is what makes the bulk toggle defensible: the user approves "every
+ * read-only tool on this server" while looking at exactly which tools that
+ * covers, rather than trusting a label.
+ */
+function ToolInventory({ serverId, tools }: { serverId: string; tools: McpToolDescriptor[] }) {
+  const preferences = useStore(preferencesStore);
+  const groups = groupByCategory(tools);
+
+  const categoryAllowed = (category: ToolCategory) =>
+    preferences.alwaysAllowedToolCategories.includes(alwaysAllowCategoryKey(serverId, category));
+
+  return (
+    <details>
+      <summary className="cursor-pointer text-xs text-fg-muted">
+        Tool inventory — {tools.length} tool{tools.length === 1 ? '' : 's'}
+        {preferences.toolApproval === 'never' ? ' · approval is off for every tool' : ''}
+      </summary>
+
+      <div className="mt-2 space-y-3">
+        {preferences.toolApproval === 'never' ? (
+          <p className="text-xs text-fg-muted">
+            Tool approval is set to “never” in preferences, so these pre-approvals have no effect
+            until that is changed.
+          </p>
+        ) : null}
+
+        {groups.map(({ category, tools: grouped }) => {
+          const bulk = isBulkApprovable(category);
+          const allowedByCategory = bulk && categoryAllowed(category);
+
+          return (
+            <section key={category} className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={TOOL_CATEGORY_TONE[category]}>{TOOL_CATEGORY_LABEL[category]}</Badge>
+                <span className="text-xs text-fg-muted">
+                  {grouped.length} · {TOOL_CATEGORY_DESCRIPTION[category]}
+                </span>
+              </div>
+
+              {bulk ? (
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={allowedByCategory}
+                    onChange={(event) =>
+                      setToolCategoryAlwaysAllowed(
+                        alwaysAllowCategoryKey(serverId, category),
+                        event.target.checked
+                      )
+                    }
+                  />
+                  Always allow every {TOOL_CATEGORY_LABEL[category]} tool on this server
+                </label>
+              ) : (
+                <p className="text-xs text-fg-muted">
+                  These cannot be approved as a group — the server said nothing about what they do,
+                  so each has to be decided on its own.
+                </p>
+              )}
+
+              <ul className="space-y-1.5">
+                {grouped.map((tool) => {
+                  const key = alwaysAllowKey(serverId, tool.name);
+                  const allowed = allowedByCategory || preferences.alwaysAllowedTools.includes(key);
+
+                  return (
+                    <li key={tool.name} className="flex items-start gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={allowed}
+                        // Covered by the category toggle: the box shows the
+                        // effective state, and unticking it here would be a lie.
+                        disabled={allowedByCategory}
+                        title={
+                          allowedByCategory
+                            ? `Allowed by the ${TOOL_CATEGORY_LABEL[category]} category`
+                            : 'Always allow this tool'
+                        }
+                        onChange={(event) => setToolAlwaysAllowed(key, event.target.checked)}
+                      />
+                      <span>
+                        <code className="font-mono">{tool.name}</code>
+                        {tool.description ? (
+                          <span className="text-fg-muted"> — {tool.description}</span>
+                        ) : null}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 

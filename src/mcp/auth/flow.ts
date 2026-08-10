@@ -19,6 +19,12 @@ import {
   selectScopes,
   validateIssuerMatch,
 } from './discovery';
+import {
+  authorizationServerCorsRemedy,
+  currentOrigin,
+  looksLikeKeycloak,
+  NATIVE_CLIENT_NOTE,
+} from '../cors-remedy';
 import { createPkcePair, generateState } from './pkce';
 import {
   savePendingRequest,
@@ -132,16 +138,43 @@ export async function discoverAuthorizationServerMetadata(
   );
 }
 
-export function selectAuthorizationServer(metadata: ProtectedResourceMetadata): string {
-  const servers = metadata.authorization_servers ?? [];
-  const first = servers[0];
-  if (!first) {
-    throw new AuthFlowError(
-      "The server's protected resource metadata lists no authorization server.",
-      'no-authorization-server'
-    );
+export function selectAuthorizationServer(metadata: ProtectedResourceMetadata): string | undefined {
+  return metadata.authorization_servers?.[0];
+}
+
+/**
+ * The fallback for a resource whose metadata names no authorization server —
+ * common enough that refusing to handle it makes servers other clients accept
+ * look broken here.
+ *
+ * MCP's legacy behaviour, still implemented by the reference SDK, is to treat
+ * the MCP server's own origin as the authorization server base URL. That URL is
+ * not an issuer identifier, so RFC 8414 §3.3's "issuer must match the URL it
+ * came from" check cannot apply to it — which is why this only reads the
+ * `issuer` out of the document and hands it back. The caller then runs ordinary
+ * issuer-validated discovery on that value, so the guarantee is recovered on
+ * the second hop: an authorization server is only trusted once its own
+ * well-known document names itself.
+ */
+export async function discoverIssuerAtResourceOrigin(
+  serverUrl: string,
+  fetchFn: FetchLike
+): Promise<string> {
+  const origin = new URL('/', serverUrl).origin;
+
+  for (const url of [
+    `${origin}/.well-known/oauth-authorization-server`,
+    `${origin}/.well-known/openid-configuration`,
+  ]) {
+    const document = await fetchJsonOrUndefined(url, fetchFn);
+    const issuer = (document as AuthorizationServerMetadata | undefined)?.issuer;
+    if (typeof issuer === 'string' && issuer !== '') return issuer;
   }
-  return first;
+
+  throw new AuthFlowError(
+    `The server's protected resource metadata lists no authorization server, and ${origin} publishes no authorization server metadata either. Its operator has to add "authorization_servers" to the protected resource metadata.`,
+    'no-authorization-server'
+  );
 }
 
 // ------------------------------------------------------ client registration
@@ -154,6 +187,8 @@ export interface ClientResolutionInput {
   clientMetadata: Record<string, unknown>;
   metadata: AuthorizationServerMetadata;
   scope?: string | undefined;
+  /** Only used to spell out the redirect URI when registration has to be manual. */
+  redirectUri?: string | undefined;
   fetchFn: FetchLike;
 }
 
@@ -174,20 +209,55 @@ export async function resolveClient(input: ClientResolutionInput): Promise<Store
 
   if (input.metadata.registration_endpoint) {
     const registered = await registerDynamically(input);
-    if (registered) return registered;
+    if (registered.ok) return registered.client;
+
+    // Saying "does not support dynamic registration" here would be false: the
+    // server advertised the endpoint and then refused the request. Report what
+    // actually happened, because the fix differs completely.
+    throw new AuthFlowError(
+      `${input.metadata.registration_endpoint} is advertised for dynamic client registration, but ${registered.reason}.\n\n${manualClientIdAdvice(input)}`,
+      'registration-failed'
+    );
   }
 
   throw new AuthFlowError(
-    "This authorization server supports neither client ID metadata documents nor dynamic registration. Enter a client ID for it in the server's advanced settings.",
+    `This authorization server supports neither client ID metadata documents nor dynamic registration.\n\n${manualClientIdAdvice(input)}`,
     'no-client-id'
   );
 }
 
-async function registerDynamically(
-  input: ClientResolutionInput
-): Promise<StoredClient | undefined> {
+/** What to do once no client ID can be obtained automatically. */
+function manualClientIdAdvice(input: ClientResolutionInput): string {
+  const origin = currentOrigin();
+  const redirect = input.redirectUri ?? `${origin}/ctbx/oauth/callback.html`;
+
+  const base = `Enter a client ID for this server under Edit → Advanced. It needs to be a public client (no secret, PKCE) with ${redirect} as a valid redirect URI.`;
+
+  if (!looksLikeKeycloak(input.metadata.issuer)) return base;
+
+  return `${base}
+
+This looks like Keycloak, where anonymous client registration is normally disabled and the refusal comes back as 403 "Invalid origin" with no CORS headers — so a browser cannot even read the reason. Create the client in the realm, add ${origin} to its Web Origins, and enter its client ID here.`;
+}
+
+type RegistrationResult =
+  | { ok: true; client: StoredClient }
+  /** Phrased to complete "…, but <reason>". */
+  | { ok: false; reason: string };
+
+/**
+ * Attempts RFC 7591 registration, and on failure says why in terms the operator
+ * can act on. The distinction that matters from a browser: a rejection the page
+ * can read (an HTTP status) versus one it cannot (the request never completed,
+ * which for a registration endpoint almost always means it returns no CORS
+ * headers on the error path).
+ */
+async function registerDynamically(input: ClientResolutionInput): Promise<RegistrationResult> {
+  const endpoint = input.metadata.registration_endpoint!;
+
+  let response: Response;
   try {
-    const response = await input.fetchFn(input.metadata.registration_endpoint!, {
+    response = await input.fetchFn(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({
@@ -198,14 +268,40 @@ async function registerDynamically(
         ...(input.scope ? { scope: input.scope } : {}),
       }),
     });
-    if (!response.ok) return undefined;
-    const body = (await response.json()) as { client_id?: string; client_secret?: string };
-    if (!body.client_id) return undefined;
+  } catch {
     return {
+      ok: false,
+      reason: `the browser could not complete the request — the endpoint does not answer cross-origin requests from ${currentOrigin()}, so its response cannot be read`,
+    };
+  }
+
+  if (!response.ok) {
+    const detail = await registrationErrorDetail(response);
+    return {
+      ok: false,
+      reason: `it answered HTTP ${response.status}${detail ? ` — ${detail}` : ''}`,
+    };
+  }
+
+  const body = (await response.json().catch(() => undefined)) as
+    { client_id?: string; client_secret?: string } | undefined;
+  if (!body?.client_id) return { ok: false, reason: 'it answered without a client_id' };
+
+  return {
+    ok: true,
+    client: {
       client_id: body.client_id,
       ...(body.client_secret ? { client_secret: body.client_secret } : {}),
       source: 'dynamic',
-    };
+    },
+  };
+}
+
+/** The `error`/`error_description` of a failed registration, when readable. */
+async function registrationErrorDetail(response: Response): Promise<string | undefined> {
+  try {
+    const body = (await response.json()) as { error?: string; error_description?: string };
+    return body.error_description ?? body.error;
   } catch {
     return undefined;
   }
@@ -309,7 +405,6 @@ async function requestToken(
     // The browser gives us nothing to distinguish "offline" from "blocked", so
     // state both and name the exact configuration that would fix the blocked
     // case. See src/mcp/cors-remedy.ts for why this is the best we can do.
-    const { authorizationServerCorsRemedy, NATIVE_CLIENT_NOTE } = await import('../cors-remedy');
     throw new AuthFlowError(
       `The browser could not complete the token request to ${input.metadata.token_endpoint}. Either the network is unavailable, or the authorization server refused the request because of its origin.\n\n${authorizationServerCorsRemedy(input.metadata.token_endpoint)}\n\n${NATIVE_CLIENT_NOTE}`,
       'token-request-failed'

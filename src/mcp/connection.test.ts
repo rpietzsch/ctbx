@@ -41,6 +41,27 @@ describe('describeHandshakeOnlyFailure', () => {
   it('handles a non-Error rejection', () => {
     expect(describeHandshakeOnlyFailure('plain string')).toContain('plain string');
   });
+
+  /**
+   * Once the client has already retried without the blocked headers, repeating
+   * the CORS advice sends the operator after a problem that is handled. Say the
+   * theory was tested and ruled out instead.
+   */
+  describe('when headers were already dropped and it still failed', () => {
+    const retried = describeHandshakeOnlyFailure(new TypeError('Failed to fetch'), [
+      'mcp-protocol-version',
+    ]);
+
+    it('rules out the header theory rather than repeating it', () => {
+      expect(retried).toMatch(/not the usual CORS header problem/i);
+      expect(retried).toMatch(/retrying without it did not help/i);
+      expect(retried).not.toContain('Access-Control-Allow-Headers');
+    });
+
+    it('names the header the way a CORS configuration spells it', () => {
+      expect(retried).toContain('MCP-Protocol-Version');
+    });
+  });
 });
 
 describe('isUnauthorized', () => {

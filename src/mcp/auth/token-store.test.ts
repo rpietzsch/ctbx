@@ -6,6 +6,7 @@ import {
   clientStore,
   pendingAuthStore,
   prunePendingRequests,
+  findClientForIssuer,
   readClient,
   readTokens,
   savePendingRequest,
@@ -96,6 +97,32 @@ describe('client registration binding', () => {
     writeClient('srv', ISSUER, { client_id: 'client-a', source: 'dynamic' });
     clearClient('srv');
     expect(readClient('srv', ISSUER)).toBeUndefined();
+  });
+});
+
+/**
+ * Two MCP servers behind one realm is the ordinary case, and the second must
+ * not have to repeat a registration the first already completed.
+ */
+describe('findClientForIssuer', () => {
+  it('finds a client another server registered with the same issuer', () => {
+    writeClient('srv-one', ISSUER, { client_id: 'client-a', source: 'dynamic' });
+    expect(findClientForIssuer(ISSUER)?.client_id).toBe('client-a');
+  });
+
+  it('does not cross issuers, so the §7.3 binding still holds', () => {
+    writeClient('srv-one', ISSUER, { client_id: 'client-a', source: 'dynamic' });
+    expect(findClientForIssuer(OTHER_ISSUER)).toBeUndefined();
+  });
+
+  it('prefers a client the user entered over one registered automatically', () => {
+    writeClient('srv-one', ISSUER, { client_id: 'auto', source: 'dynamic' });
+    writeClient('srv-two', ISSUER, { client_id: 'by-hand', source: 'pre-registered' });
+    expect(findClientForIssuer(ISSUER)?.client_id).toBe('by-hand');
+  });
+
+  it('returns nothing when no client is stored at all', () => {
+    expect(findClientForIssuer(ISSUER)).toBeUndefined();
   });
 });
 

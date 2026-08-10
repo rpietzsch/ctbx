@@ -1,11 +1,12 @@
 /**
  * Actionable CORS remedies.
  *
- * A browser cannot read a blocked response, so ctbx can never *prove* which
- * header is missing from inside the page (an OPTIONS probe is itself subject to
- * the same preflight). What it can do is name the exact configuration the
- * operator has to add, including this app's origin — which turns an opaque
- * "failed to fetch" into a copy-pasteable fix.
+ * A browser cannot read a blocked response, so most of what follows names the
+ * exact configuration the operator has to add, including this app's origin —
+ * which turns an opaque "failed to fetch" into a copy-pasteable fix, even when
+ * ctbx can only infer the cause. The exception is
+ * `blockedRequestHeaderRemedy`, which reports what a differential probe
+ * measured rather than what it suspects.
  *
  * The Keycloak case is called out by name because it is the most common trap:
  * Keycloak answers the *preflight* for any origin, then rejects the actual
@@ -82,3 +83,28 @@ Mcp-Session-Id and MCP-Protocol-Version in Allow-Headers are the ones most often
  */
 export const NATIVE_CLIENT_NOTE =
   'A command-line MCP client (such as Claude Code) is a native process and is not subject to CORS at all, so a server can work there and still be unusable from a browser. CORS is enforced by the browser, not the server.';
+
+/**
+ * Remedy for headers a differential probe *proved* the browser will not send:
+ * the same request went through without them and was blocked with them, so this
+ * is a measurement rather than the informed guess `mcpEndpointCorsRemedy` makes.
+ */
+export function blockedRequestHeaderRemedy(
+  names: readonly string[],
+  origin = currentOrigin()
+): string {
+  const list = names.join(', ');
+  const fatal = names.some((name) => name.toLowerCase() === 'mcp-session-id');
+
+  return `The MCP server's CORS policy does not accept ${list} from ${origin}. Its preflight response must list every header the MCP client sends:
+
+  Access-Control-Allow-Headers: Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version
+
+${
+  fatal
+    ? 'ctbx omits the headers it can do without, but a stateful server cannot be used from a browser without Mcp-Session-Id — every request after the handshake would start a new session.'
+    : 'ctbx works around this by omitting the header; a server that does not receive MCP-Protocol-Version has to assume protocol version 2025-03-26, so this costs the newer protocol revision until the server is fixed.'
+}
+
+${NATIVE_CLIENT_NOTE}`;
+}

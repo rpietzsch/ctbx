@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  alwaysAllowCategoryKey,
   alwaysAllowKey,
+  type ApprovalPolicy,
   buildTools,
   namespaceToolName,
   needsApproval,
@@ -102,20 +104,79 @@ describe('uniqueSlugs', () => {
 });
 
 describe('needsApproval', () => {
+  const policy = (overrides: Partial<ApprovalPolicy> = {}): ApprovalPolicy => ({
+    mode: 'always',
+    alwaysAllowedTools: [],
+    alwaysAllowedCategories: [],
+    ...overrides,
+  });
+  const readOnly = { name: 'query', annotations: { readOnlyHint: true } };
+
   it('asks by default', () => {
-    expect(needsApproval('always', [], 'srv', 'query')).toBe(true);
+    expect(needsApproval(policy(), 'srv', { name: 'query' })).toBe(true);
   });
 
   it('does not ask for a tool the user marked always-allow', () => {
-    expect(needsApproval('always', [alwaysAllowKey('srv', 'query')], 'srv', 'query')).toBe(false);
+    expect(
+      needsApproval(policy({ alwaysAllowedTools: [alwaysAllowKey('srv', 'query')] }), 'srv', {
+        name: 'query',
+      })
+    ).toBe(false);
   });
 
   it('scopes always-allow to a single server', () => {
-    expect(needsApproval('always', [alwaysAllowKey('other', 'query')], 'srv', 'query')).toBe(true);
+    expect(
+      needsApproval(policy({ alwaysAllowedTools: [alwaysAllowKey('other', 'query')] }), 'srv', {
+        name: 'query',
+      })
+    ).toBe(true);
   });
 
   it('skips only under the explicit never mode', () => {
-    expect(needsApproval('never', [], 'srv', 'query')).toBe(false);
+    expect(needsApproval(policy({ mode: 'never' }), 'srv', { name: 'query' })).toBe(false);
+  });
+
+  it('honours a category-wide approval', () => {
+    expect(
+      needsApproval(
+        policy({ alwaysAllowedCategories: [alwaysAllowCategoryKey('srv', 'read-only')] }),
+        'srv',
+        readOnly
+      )
+    ).toBe(false);
+  });
+
+  it('does not let one category approve another', () => {
+    expect(
+      needsApproval(
+        policy({ alwaysAllowedCategories: [alwaysAllowCategoryKey('srv', 'read-only')] }),
+        'srv',
+        { name: 'drop', annotations: { destructiveHint: true } }
+      )
+    ).toBe(true);
+  });
+
+  it('scopes a category-wide approval to a single server', () => {
+    expect(
+      needsApproval(
+        policy({ alwaysAllowedCategories: [alwaysAllowCategoryKey('other', 'read-only')] }),
+        'srv',
+        readOnly
+      )
+    ).toBe(true);
+  });
+
+  /**
+   * The guarantee behind bulk approval: a tool the server never described is
+   * never swept up by it, however the categories are configured.
+   */
+  it('never covers an unannotated tool with a category approval', () => {
+    const everyCategory = ['read-only', 'write', 'destructive', 'unannotated'].map((category) =>
+      alwaysAllowCategoryKey('srv', category as never)
+    );
+    expect(
+      needsApproval(policy({ alwaysAllowedCategories: everyCategory }), 'srv', { name: 'mystery' })
+    ).toBe(true);
   });
 });
 
@@ -151,7 +212,12 @@ describe('normalizeToolResult', () => {
 });
 
 describe('buildTools', () => {
-  const options = { approvalMode: 'always' as const, alwaysAllowed: [], gate: approveAll };
+  const options = {
+    mode: 'always' as const,
+    alwaysAllowedTools: [],
+    alwaysAllowedCategories: [],
+    gate: approveAll,
+  };
 
   it('namespaces every tool', () => {
     const tools = buildTools([makeServer()], options);
@@ -207,7 +273,7 @@ describe('buildTools', () => {
     const gate = { request: vi.fn(async () => ({ approved: true as const })) };
     const tools = buildTools([makeServer()], {
       ...options,
-      alwaysAllowed: [alwaysAllowKey('srv-1', 'query')],
+      alwaysAllowedTools: [alwaysAllowKey('srv-1', 'query')],
       gate,
     });
 

@@ -3,6 +3,7 @@ import {
   AuthFlowError,
   beginAuthorization,
   discoverAuthorizationServerMetadata,
+  discoverIssuerAtResourceOrigin,
   discoverProtectedResourceMetadata,
   exchangeAuthorizationCode,
   refreshAccessToken,
@@ -26,6 +27,16 @@ const AS_METADATA: AuthorizationServerMetadata = {
   authorization_endpoint: `${ISSUER}/authorize`,
   token_endpoint: `${ISSUER}/token`,
 };
+
+/** The rejection of a promise, typed, so a message can be asserted on. */
+async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error('expected the promise to reject');
+}
 
 /** Builds a fetch double from a map of URL → response. */
 function fakeFetch(routes: Record<string, { status?: number; body?: unknown }>): FetchLike {
@@ -168,8 +179,73 @@ describe('selectAuthorizationServer', () => {
     expect(selectAuthorizationServer({ authorization_servers: [ISSUER] })).toBe(ISSUER);
   });
 
-  it('errors when none is listed', () => {
-    expect(() => selectAuthorizationServer({})).toThrow(AuthFlowError);
+  /**
+   * Not an error any more: the caller falls back to looking for an
+   * authorization server at the resource's own origin, which is what makes
+   * PRM-without-authorization_servers deployments usable at all.
+   */
+  it('reports absence rather than failing, so the origin fallback can run', () => {
+    expect(selectAuthorizationServer({})).toBeUndefined();
+  });
+});
+
+describe('discoverIssuerAtResourceOrigin', () => {
+  const ORIGIN_ISSUER = 'https://mcp.example.com/auth/realms/cmem';
+
+  it('reads the issuer from the resource origin well-known document', async () => {
+    const fetchFn = fakeFetch({
+      'https://mcp.example.com/.well-known/oauth-authorization-server': {
+        body: {
+          issuer: ORIGIN_ISSUER,
+          authorization_endpoint: `${ORIGIN_ISSUER}/protocol/openid-connect/auth`,
+          token_endpoint: `${ORIGIN_ISSUER}/protocol/openid-connect/token`,
+        },
+      },
+    });
+
+    await expect(discoverIssuerAtResourceOrigin(MCP_URL, fetchFn)).resolves.toBe(ORIGIN_ISSUER);
+  });
+
+  it('falls through to the OpenID Connect document', async () => {
+    const fetchFn = fakeFetch({
+      'https://mcp.example.com/.well-known/openid-configuration': {
+        body: { issuer: ORIGIN_ISSUER },
+      },
+    });
+
+    await expect(discoverIssuerAtResourceOrigin(MCP_URL, fetchFn)).resolves.toBe(ORIGIN_ISSUER);
+  });
+
+  it('explains what the operator must add when the origin publishes nothing', async () => {
+    const fetchFn = fakeFetch({});
+    await expect(discoverIssuerAtResourceOrigin(MCP_URL, fetchFn)).rejects.toThrow(
+      /authorization_servers/
+    );
+  });
+
+  /**
+   * The origin document is only a pointer. Trust still depends on the issuer's
+   * own metadata naming itself, which `discoverAuthorizationServerMetadata`
+   * enforces — so a document that lies about its issuer buys nothing.
+   */
+  it('leaves issuer validation to the second hop', async () => {
+    const fetchFn = fakeFetch({
+      'https://mcp.example.com/.well-known/oauth-authorization-server': {
+        body: { issuer: 'https://attacker.example' },
+      },
+      'https://attacker.example/.well-known/oauth-authorization-server': {
+        body: {
+          issuer: 'https://somewhere-else.example',
+          authorization_endpoint: 'https://attacker.example/auth',
+          token_endpoint: 'https://attacker.example/token',
+        },
+      },
+    });
+
+    const issuer = await discoverIssuerAtResourceOrigin(MCP_URL, fetchFn);
+    await expect(discoverAuthorizationServerMetadata(issuer, fetchFn)).rejects.toThrow(
+      AuthFlowError
+    );
   });
 });
 
@@ -240,14 +316,57 @@ describe('resolveClient — registration priority (spec §7.3)', () => {
     });
   });
 
-  it('asks the user when dynamic registration fails', async () => {
+  /**
+   * A server that advertises a registration endpoint and then refuses is not a
+   * server "without dynamic registration" — reporting it that way sends the
+   * operator after the wrong thing entirely.
+   */
+  it('reports a refused registration as a refusal, with the status', async () => {
     await expect(
       resolveClient({
         ...base,
         metadata: { ...AS_METADATA, registration_endpoint: `${ISSUER}/register` },
-        fetchFn: fakeFetch({ [`${ISSUER}/register`]: { status: 400 } }),
+        fetchFn: fakeFetch({
+          [`${ISSUER}/register`]: { status: 403, body: { error: 'Invalid origin' } },
+        }),
       })
-    ).rejects.toMatchObject({ code: 'no-client-id' });
+    ).rejects.toMatchObject({ code: 'registration-failed' });
+  });
+
+  it('quotes the error the registration endpoint returned', async () => {
+    const error = await rejectionOf(
+      resolveClient({
+        ...base,
+        metadata: { ...AS_METADATA, registration_endpoint: `${ISSUER}/register` },
+        fetchFn: fakeFetch({
+          [`${ISSUER}/register`]: { status: 403, body: { error: 'Invalid origin' } },
+        }),
+      })
+    );
+
+    expect(error.message).toContain('HTTP 403');
+    expect(error.message).toContain('Invalid origin');
+    expect(error.message).toMatch(/Advanced/);
+  });
+
+  /**
+   * From a browser the interesting failure is the one with no readable
+   * response at all: an endpoint that returns no CORS headers on its error
+   * path. Saying "could not read it" is the only honest report.
+   */
+  it('distinguishes a response it could not read from one it could', async () => {
+    const error = await rejectionOf(
+      resolveClient({
+        ...base,
+        metadata: { ...AS_METADATA, registration_endpoint: `${ISSUER}/register` },
+        fetchFn: vi.fn(async () => {
+          throw new TypeError('NetworkError when attempting to fetch resource.');
+        }),
+      })
+    );
+
+    expect(error.message).toMatch(/could not complete the request/i);
+    expect(error.message).not.toMatch(/HTTP \d/);
   });
 });
 

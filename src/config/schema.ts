@@ -55,6 +55,11 @@ export const preferencesSchema = z.object({
   toolApproval: toolApprovalModeSchema.default('always'),
   /** Tools the user marked "always allow", as `serverId:toolName`. */
   alwaysAllowedTools: z.array(z.string()).default([]),
+  /**
+   * Whole risk categories the user marked "always allow", as
+   * `serverId:category` — e.g. every read-only tool on one server.
+   */
+  alwaysAllowedToolCategories: z.array(z.string()).default([]),
   sendOnEnter: z.boolean().default(true),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;

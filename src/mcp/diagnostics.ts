@@ -13,11 +13,23 @@
  *                                                  the browser blocked it: CORS
  *   normal fetch fails + no-cors probe fails     → genuinely unreachable
  *
+ * A second trick covers the harder case, where the endpoint answers `initialize`
+ * and the connection still dies: the same request is repeated carrying one of
+ * the headers the MCP client adds after the handshake. Succeeding without it and
+ * failing with it isolates that header as the blocked one — which is a
+ * measurement, not a guess, and the reason the remedy can name it.
+ *
  * The decision logic is pure and exhaustively tested; only `probe` touches the
  * network.
  */
 
-import { mcpEndpointCorsRemedy, NATIVE_CLIENT_NOTE, tokenRejectedRemedy } from './cors-remedy';
+import {
+  blockedRequestHeaderRemedy,
+  mcpEndpointCorsRemedy,
+  NATIVE_CLIENT_NOTE,
+  tokenRejectedRemedy,
+} from './cors-remedy';
+import { canonicalHeaderName } from './header-negotiation';
 import { extractChallengeError } from './auth/discovery';
 
 export type DiagnosisKind =
@@ -25,6 +37,7 @@ export type DiagnosisKind =
   | 'needs-auth'
   | 'token-rejected'
   | 'cors'
+  | 'cors-headers'
   | 'network'
   | 'not-found'
   | 'server-error'
@@ -48,6 +61,11 @@ export interface ProbeOutcome {
   wwwAuthenticateReadable?: boolean;
   /** True when `Mcp-Session-Id` was readable on a successful response. */
   sessionIdReadable?: boolean;
+  /**
+   * Headers the differential probe proved the browser will not send to this
+   * endpoint: the request went through without them and was blocked with them.
+   */
+  blockedRequestHeaders?: string[];
   /**
    * True when the probe carried an access token. Without this the diagnosis
    * cannot distinguish "never authorized" from "token refused" — every probe
@@ -134,6 +152,21 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
     };
   }
 
+  // The endpoint speaks MCP, so anything below is about what the *browser* is
+  // allowed to send it. This is the case a plain probe used to call "ok" while
+  // the connection kept failing.
+  if (outcome.blockedRequestHeaders?.length) {
+    const names = outcome.blockedRequestHeaders.map(canonicalHeaderName);
+    return {
+      kind: 'cors-headers',
+      // Deliberately silent on whether the connection survived: ctbx drops the
+      // header where it can, so this same verdict appears next to a connected
+      // server and next to a failed one.
+      message: `The endpoint answers a plain initialize request, but the browser blocks any request carrying ${names.join(' or ')} — ${names.length === 1 ? 'a header' : 'headers'} the MCP client sends on every request after the handshake. That is why the endpoint looks healthy to a single probe.`,
+      remedy: blockedRequestHeaderRemedy(names),
+    };
+  }
+
   // Wording matters here: this probe is a single `initialize` POST. It says
   // nothing about whether a session can be maintained, so it must not claim to
   // be "connected" — that reads as a contradiction next to a failed connection.
@@ -141,9 +174,9 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
     return {
       kind: 'ok',
       message:
-        'The endpoint answered a single MCP initialize request, but Mcp-Session-Id is not readable, so sessions cannot be resumed.',
+        'The endpoint answered a single MCP initialize request. No Mcp-Session-Id came back with it.',
       remedy:
-        'The MCP server should add Mcp-Session-Id to Access-Control-Expose-Headers to allow session resumption across reloads.',
+        'That is expected from a stateless MCP server and needs no action. If the server is stateful, it is missing Mcp-Session-Id from Access-Control-Expose-Headers — the browser then hides the session id, and every request after the handshake starts a new session.',
     };
   }
 
@@ -159,7 +192,42 @@ export interface DiagnoseOptions {
   issuer?: string | undefined;
 }
 
-/** Runs the two probes and analyses the outcome. */
+/**
+ * Headers the differential probe tests one at a time, with the value the MCP
+ * client would really send. Only the name reaches the preflight, but a
+ * plausible value keeps the request itself valid if it does get through.
+ */
+const PROBED_HEADERS: Record<string, string> = {
+  'MCP-Protocol-Version': '2025-06-18',
+  'Mcp-Session-Id': 'ctbx-cors-probe',
+};
+
+/**
+ * Repeats the request once per candidate header and reports the ones that turn
+ * a working request into an opaque failure. Any HTTP answer — including 400 or
+ * 404 for the made-up session id — means the browser allowed the header, which
+ * is the only question being asked here.
+ */
+async function probeBlockedHeaders(
+  url: string,
+  fetchFn: FetchLike,
+  headers: Record<string, string>,
+  body: string
+): Promise<string[]> {
+  const results = await Promise.all(
+    Object.entries(PROBED_HEADERS).map(async ([name, value]) => {
+      try {
+        await fetchFn(url, { method: 'POST', headers: { ...headers, [name]: value }, body });
+        return undefined;
+      } catch {
+        return name;
+      }
+    })
+  );
+  return results.filter((name): name is string => name !== undefined);
+}
+
+/** Runs the probes and analyses the outcome. */
 export async function diagnoseConnection(
   url: string,
   fetchFn: FetchLike = fetch,
@@ -186,6 +254,13 @@ export async function diagnoseConnection(
     const response = await fetchFn(url, { method: 'POST', headers, body });
     const challenge = response.headers.get('WWW-Authenticate');
 
+    // Only worth asking once the endpoint has shown it answers at all: below
+    // 400 the handshake worked, so a post-handshake header is the remaining
+    // suspect. On a 401 the auth problem is the story and the extra requests
+    // would just be noise.
+    const blockedRequestHeaders =
+      response.status < 400 ? await probeBlockedHeaders(url, fetchFn, headers, body) : [];
+
     return analyzeProbe({
       corsRequestSucceeded: true,
       status: response.status,
@@ -195,6 +270,7 @@ export async function diagnoseConnection(
       challengeError: extractChallengeError(challenge),
       resource: url,
       issuer: options.issuer,
+      blockedRequestHeaders,
     });
   } catch {
     let reachable: boolean;

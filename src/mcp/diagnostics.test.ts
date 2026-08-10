@@ -146,6 +146,45 @@ describe('analyzeProbe', () => {
     expect(result.kind).toBe('ok');
     expect(result.remedy).toBeUndefined();
   });
+
+  /**
+   * The verdict that used to be missing: the handshake works, so the old probe
+   * said "ok" while the connection kept dying on the next request.
+   */
+  it('names the blocked header instead of calling the endpoint ok', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 200,
+      sessionIdReadable: true,
+      blockedRequestHeaders: ['MCP-Protocol-Version'],
+    });
+    expect(result.kind).toBe('cors-headers');
+    expect(result.message).toContain('MCP-Protocol-Version');
+    expect(result.remedy).toContain('Access-Control-Allow-Headers');
+  });
+
+  it('says a blocked session header cannot be worked around', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 200,
+      blockedRequestHeaders: ['MCP-Protocol-Version', 'Mcp-Session-Id'],
+    });
+    expect(result.kind).toBe('cors-headers');
+    expect(result.remedy).toMatch(/stateful server cannot be used from a browser/i);
+  });
+
+  /**
+   * A stateless MCP server never sends a session id, and that is fine. The old
+   * wording accused every such server of a CORS misconfiguration.
+   */
+  it('does not accuse a stateless server of hiding its session id', () => {
+    const result = analyzeProbe({
+      corsRequestSucceeded: true,
+      status: 200,
+      sessionIdReadable: false,
+    });
+    expect(result.remedy).toMatch(/stateless MCP server and needs no action/i);
+  });
 });
 
 describe('diagnoseConnection', () => {
@@ -221,6 +260,31 @@ describe('diagnoseConnection', () => {
     await diagnoseConnection('https://mcp.example.com/mcp', fetchFn);
     const headers = (fetchFn.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
+  });
+
+  /**
+   * The differential probe: same request, once with the header the MCP client
+   * adds after the handshake. Succeeding without it and failing with it is what
+   * turns the remedy from a guess into a measurement.
+   */
+  it('isolates a request header the browser refuses to send', async () => {
+    const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      if (headers.has('MCP-Protocol-Version')) throw new TypeError('Failed to fetch');
+      return new Response('{}', { status: 200, headers: { 'Mcp-Session-Id': 'session-1' } });
+    });
+
+    const result = await diagnoseConnection('https://mcp.example.com/mcp', fetchFn);
+
+    expect(result.kind).toBe('cors-headers');
+    expect(result.message).toContain('MCP-Protocol-Version');
+    expect(result.message).not.toContain('Mcp-Session-Id');
+  });
+
+  it('does not run the differential probe when the endpoint answered 401', async () => {
+    const fetchFn = vi.fn(async () => new Response('', { status: 401 }));
+    await diagnoseConnection('https://mcp.example.com/mcp', fetchFn);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it('sends a real MCP initialize request', async () => {

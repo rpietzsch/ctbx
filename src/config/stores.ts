@@ -75,3 +75,32 @@ export function upsertMcpServer(server: McpServerConfig): void {
 export function removeMcpServer(id: string): void {
   mcpServerStore.update((servers) => servers.filter((s) => s.id !== id));
 }
+
+export function setMcpServerEnabled(id: string, enabled: boolean): void {
+  mcpServerStore.update((servers) =>
+    servers.map((server) => (server.id === id ? { ...server, enabled } : server))
+  );
+}
+
+/**
+ * Pre-approval toggles. Keys are opaque strings here — `serverId:toolName` and
+ * `serverId:category`, built by the MCP layer that owns those shapes.
+ */
+function toggleIn(list: readonly string[], key: string, allowed: boolean): string[] {
+  const without = list.filter((entry) => entry !== key);
+  return allowed ? [...without, key] : without;
+}
+
+export function setToolAlwaysAllowed(key: string, allowed: boolean): void {
+  preferencesStore.update((current) => ({
+    ...current,
+    alwaysAllowedTools: toggleIn(current.alwaysAllowedTools, key, allowed),
+  }));
+}
+
+export function setToolCategoryAlwaysAllowed(key: string, allowed: boolean): void {
+  preferencesStore.update((current) => ({
+    ...current,
+    alwaysAllowedToolCategories: toggleIn(current.alwaysAllowedToolCategories, key, allowed),
+  }));
+}

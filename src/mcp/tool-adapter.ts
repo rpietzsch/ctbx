@@ -1,5 +1,11 @@
 import { jsonSchema, tool, type Tool, type ToolSet } from 'ai';
 import type { ToolApprovalMode } from '@/config/schema';
+import {
+  isBulkApprovable,
+  toolCategory,
+  type ToolAnnotations,
+  type ToolCategory,
+} from './tool-categories';
 
 /**
  * Adapts MCP tools into AI SDK tools (spec §6.3) and enforces the approval
@@ -92,19 +98,39 @@ export function alwaysAllowKey(serverId: string, toolName: string): string {
   return `${serverId}:${toolName}`;
 }
 
+/** Key for a whole risk category on one server, e.g. every read-only tool. */
+export function alwaysAllowCategoryKey(serverId: string, category: ToolCategory): string {
+  return `${serverId}:${category}`;
+}
+
+export interface ApprovalPolicy {
+  mode: ToolApprovalMode;
+  /** `serverId:toolName` entries. */
+  alwaysAllowedTools: readonly string[];
+  /** `serverId:category` entries. */
+  alwaysAllowedCategories: readonly string[];
+}
+
 /**
  * Decides whether the user must be asked. `always` is the default; `never` is
  * an explicit, per-user opt-out and is the only path that skips the prompt
  * wholesale.
+ *
+ * A category-wide approval is honoured only for a category the server actually
+ * annotated: `unannotated` tools are excluded, so "allow all read-only tools"
+ * can never silently cover a tool whose behaviour the server never described.
  */
 export function needsApproval(
-  mode: ToolApprovalMode,
-  alwaysAllowed: readonly string[],
+  policy: ApprovalPolicy,
   serverId: string,
-  toolName: string
+  tool: { name: string; annotations?: ToolAnnotations }
 ): boolean {
-  if (mode === 'never') return false;
-  return !alwaysAllowed.includes(alwaysAllowKey(serverId, toolName));
+  if (policy.mode === 'never') return false;
+  if (policy.alwaysAllowedTools.includes(alwaysAllowKey(serverId, tool.name))) return false;
+
+  const category = toolCategory(tool.annotations);
+  if (!isBulkApprovable(category)) return true;
+  return !policy.alwaysAllowedCategories.includes(alwaysAllowCategoryKey(serverId, category));
 }
 
 // --------------------------------------------------------------- result shape
@@ -146,6 +172,8 @@ export interface McpToolDescriptor {
   name: string;
   description?: string;
   inputSchema?: unknown;
+  /** The server's own risk hints, used for grouping and bulk approval. */
+  annotations?: ToolAnnotations;
 }
 
 export interface AdaptableServer {
@@ -156,9 +184,7 @@ export interface AdaptableServer {
   callTool(name: string, args: unknown, signal?: AbortSignal): Promise<McpToolResult>;
 }
 
-export interface BuildToolsOptions {
-  approvalMode: ToolApprovalMode;
-  alwaysAllowed: readonly string[];
+export interface BuildToolsOptions extends ApprovalPolicy {
   gate: ApprovalGate;
   onAlwaysAllow?: (serverId: string, toolName: string) => void;
 }
@@ -176,9 +202,7 @@ export function buildTools(servers: AdaptableServer[], options: BuildToolsOption
         // round-tripping through zod and risking a lossy conversion.
         inputSchema: jsonSchema((descriptor.inputSchema ?? { type: 'object' }) as never),
         async execute(args: unknown, { abortSignal }: { abortSignal?: AbortSignal }) {
-          if (
-            needsApproval(options.approvalMode, options.alwaysAllowed, server.id, descriptor.name)
-          ) {
+          if (needsApproval(options, server.id, descriptor)) {
             const decision = await options.gate.request({
               serverId: server.id,
               serverName: server.name,

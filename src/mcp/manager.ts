@@ -24,12 +24,20 @@ export class McpManager {
     for (const listener of this.listeners) listener();
   }
 
-  /** Reconciles live connections against the stored configuration. */
+  /**
+   * Reconciles live connections against the stored configuration.
+   *
+   * A disabled server is treated exactly like a removed one: its connection is
+   * closed and dropped. That is what makes the toggle meaningful — leaving the
+   * connection open would keep feeding the model tools the user just switched
+   * off.
+   */
   sync(): void {
     const configs = mcpServerStore.get();
     const seen = new Set<string>();
 
     for (const config of configs) {
+      if (!config.enabled) continue;
       seen.add(config.id);
       const existing = this.connections.get(config.id);
       if (!existing) {
@@ -118,8 +126,9 @@ export class McpManager {
   tools(overrides?: { approvalMode?: ToolApprovalMode }): ToolSet {
     const preferences = preferencesStore.get();
     return buildTools(this.adaptableServers(), {
-      approvalMode: overrides?.approvalMode ?? preferences.toolApproval,
-      alwaysAllowed: preferences.alwaysAllowedTools,
+      mode: overrides?.approvalMode ?? preferences.toolApproval,
+      alwaysAllowedTools: preferences.alwaysAllowedTools,
+      alwaysAllowedCategories: preferences.alwaysAllowedToolCategories,
       gate: this.gate,
       onAlwaysAllow: (serverId, toolName) => {
         preferencesStore.update((current) => ({

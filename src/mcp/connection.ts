@@ -7,10 +7,17 @@ import { defineStore } from '@/storage/local';
 import { safeParser } from '@/config/schema';
 import { diagnoseConnection, type Diagnosis } from './diagnostics';
 import { mcpEndpointCorsRemedy } from './cors-remedy';
+import {
+  canonicalHeaderName,
+  createNegotiatingFetch,
+  type NegotiatingFetch,
+} from './header-negotiation';
 import type { McpToolDescriptor, McpToolResult } from './tool-adapter';
 import {
+  AuthFlowError,
   beginAuthorization,
   discoverAuthorizationServerMetadata,
+  discoverIssuerAtResourceOrigin,
   discoverProtectedResourceMetadata,
   exchangeAuthorizationCode,
   refreshAccessToken,
@@ -18,10 +25,12 @@ import {
   revokeToken,
   selectAuthorizationServer,
   type AuthorizationServerMetadata,
+  type ProtectedResourceMetadata,
 } from './auth/flow';
 import {
   clearClient,
   clearTokens,
+  findClientForIssuer,
   readClient,
   readTokens,
   shouldRefresh,
@@ -56,6 +65,12 @@ export interface ConnectionSnapshot {
   tokenExpiresAt?: number;
   /** Whether an access token is stored, regardless of whether it works. */
   hasToken?: boolean;
+  /**
+   * MCP headers this server's CORS policy rejects, which the client dropped to
+   * keep the connection alive. The connection works; the server is misconfigured
+   * and its operator should hear about it.
+   */
+  droppedHeaders?: string[];
 }
 
 /**
@@ -67,15 +82,6 @@ const issuerStore = defineStore<Record<string, string>>({
   name: 'mcp-issuers',
   version: 1,
   label: 'Discovered MCP authorization servers',
-  fallback: () => ({}),
-  parse: safeParser(z.record(z.string(), z.string())),
-});
-
-/** Session ids, so a reload resumes rather than re-initializing (spec §6.1). */
-const sessionStore = defineStore<Record<string, string>>({
-  name: 'mcp-sessions',
-  version: 1,
-  label: 'MCP session identifiers',
   fallback: () => ({}),
   parse: safeParser(z.record(z.string(), z.string())),
 });
@@ -95,6 +101,7 @@ export class McpConnection {
   private listeners = new Set<(snapshot: ConnectionSnapshot) => void>();
   private stepUpAttempts = 0;
   private lastChallenge?: { header: string | null; scope?: string };
+  private negotiating?: NegotiatingFetch;
 
   constructor(
     public config: McpServerConfig,
@@ -130,16 +137,37 @@ export class McpConnection {
     return issuer ? readTokens(this.config.id, issuer) : undefined;
   }
 
-  /** Builds the transport, attaching a bearer token when one is held. */
+  /**
+   * Builds the transport, attaching a bearer token when one is held.
+   *
+   * No stored session id is restored, deliberately. `Client.connect()` returns
+   * early when the transport already carries one — it skips `initialize`
+   * entirely, so the client never learns the server's capabilities and the
+   * `tools/list` right after it fails with "server does not support tools". A
+   * fresh handshake on every page load costs one request and always works.
+   *
+   * Every request goes through a negotiating fetch, so a CORS policy that
+   * rejects an optional MCP header degrades the connection instead of killing
+   * it (see header-negotiation.ts).
+   */
   private buildTransport(token?: string): StreamableHTTPClientTransport {
     const headers: Record<string, string> = {};
     if (token) headers.Authorization = `Bearer ${token}`;
 
-    const sessionId = sessionStore.get()[this.config.id];
     return new StreamableHTTPClientTransport(new URL(this.config.url), {
       requestInit: { headers },
-      ...(sessionId ? { sessionId } : {}),
+      fetch: this.negotiate(),
     });
+  }
+
+  /** A fresh negotiating fetch for one transport, reporting what it drops. */
+  private negotiate(): NegotiatingFetch {
+    const negotiating = createNegotiatingFetch({
+      fetchFn: this.fetchFn,
+      onDrop: (dropped) => this.emit({ droppedHeaders: [...dropped] }),
+    });
+    this.negotiating = negotiating;
+    return negotiating;
   }
 
   async connect(): Promise<void> {
@@ -163,6 +191,7 @@ export class McpConnection {
         state: 'connected',
         error: undefined,
         hasToken: tokens !== undefined,
+        droppedHeaders: [...(this.negotiating?.dropped ?? [])],
         ...(issuer ? { issuer } : {}),
         ...(tokens?.scope ? { grantedScopes: tokens.scope } : {}),
         ...(tokens?.expiresAt ? { tokenExpiresAt: tokens.expiresAt } : {}),
@@ -180,18 +209,14 @@ export class McpConnection {
     const client = new Client({ name: 'ctbx', version: '0.1.0' }, { capabilities: {} });
 
     try {
-      const transport = this.buildTransport(token);
-      await client.connect(transport);
+      await client.connect(this.buildTransport(token));
       this.client = client;
-      const sessionId = transport.sessionId;
-      if (sessionId) {
-        sessionStore.update((all) => ({ ...all, [this.config.id]: sessionId }));
-      }
     } catch (error) {
       // Deprecated HTTP+SSE servers reject the POST handshake (spec §6.1).
       if (isMethodNotAllowed(error)) {
         const transport = new SSEClientTransport(new URL(this.config.url), {
           requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : {},
+          fetch: this.negotiate(),
         });
         await client.connect(transport);
         this.client = client;
@@ -209,6 +234,7 @@ export class McpConnection {
         name: tool.name,
         ...(tool.description ? { description: tool.description } : {}),
         inputSchema: tool.inputSchema,
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
       })),
     });
   }
@@ -249,7 +275,7 @@ export class McpConnection {
     if (diagnosis.kind === 'ok') {
       this.emit({
         state: 'error',
-        error: describeHandshakeOnlyFailure(error),
+        error: describeHandshakeOnlyFailure(error, this.negotiating?.dropped),
         diagnosis,
         hasToken: tokens !== undefined,
       });
@@ -269,13 +295,16 @@ export class McpConnection {
     this.emit({ state: 'authorizing', error: undefined });
 
     try {
-      const { metadata: resourceMetadata } = await discoverProtectedResourceMetadata(
-        this.config.url,
-        this.lastChallenge?.header ?? null,
-        this.fetchFn
-      );
+      const resourceMetadata = await this.discoverResource();
 
-      const issuer = selectAuthorizationServer(resourceMetadata);
+      // A resource that names no authorization server is not a dead end: MCP's
+      // legacy fallback looks for one at the resource's own origin, which is
+      // what every native client does and the only reason those servers work
+      // anywhere. `discoverIssuerAtResourceOrigin` only learns the issuer; the
+      // issuer-validated discovery below is still what decides to trust it.
+      const issuer =
+        selectAuthorizationServer(resourceMetadata) ??
+        (await discoverIssuerAtResourceOrigin(this.config.url, this.fetchFn));
       const previousIssuer = this.issuer();
       if (previousIssuer && previousIssuer !== issuer) {
         // The authorization server changed: never reuse credentials bound to
@@ -311,6 +340,28 @@ export class McpConnection {
     }
   }
 
+  /**
+   * RFC 9728 metadata for the endpoint, or an empty document when it publishes
+   * none. Missing metadata is not fatal on its own — the origin fallback can
+   * still find the authorization server — so it must not abort the flow before
+   * that has been tried.
+   */
+  private async discoverResource(): Promise<ProtectedResourceMetadata> {
+    try {
+      const { metadata } = await discoverProtectedResourceMetadata(
+        this.config.url,
+        this.lastChallenge?.header ?? null,
+        this.fetchFn
+      );
+      return metadata;
+    } catch (error) {
+      if (error instanceof AuthFlowError && error.code === 'no-protected-resource-metadata') {
+        return {};
+      }
+      throw error;
+    }
+  }
+
   private async resolveClientFor(
     issuer: string,
     metadata: AuthorizationServerMetadata
@@ -319,11 +370,24 @@ export class McpConnection {
     if (stored && !this.config.clientId) return stored;
     if (stored && this.config.clientId === stored.client_id) return stored;
 
+    // Nothing registered for this server yet — but another configured server
+    // may already have a client for the same authorization server. Reusing it
+    // is what makes the second MCP server behind one realm just work, instead
+    // of failing on a registration endpoint that refuses browsers.
+    if (!this.config.clientId) {
+      const sibling = findClientForIssuer(issuer);
+      if (sibling) {
+        writeClient(this.config.id, issuer, sibling);
+        return sibling;
+      }
+    }
+
     const client = await resolveClient({
       configuredClientId: this.config.clientId,
       clientMetadataUrl: clientMetadataUrl(),
       clientMetadata: clientMetadataDocument(),
       metadata,
+      redirectUri: redirectUri(),
       fetchFn: this.fetchFn,
     });
     writeClient(this.config.id, issuer, client);
@@ -471,12 +535,8 @@ export class McpConnection {
       /* already gone */
     }
     this.client = undefined;
-    sessionStore.update((all) => {
-      const next = { ...all };
-      delete next[this.config.id];
-      return next;
-    });
-    this.emit({ state: 'disconnected', tools: [], error: undefined });
+    this.negotiating = undefined;
+    this.emit({ state: 'disconnected', tools: [], error: undefined, droppedHeaders: [] });
   }
 }
 
@@ -487,10 +547,26 @@ function errorText(error: unknown): string {
 
 /**
  * Message for the case where a plain `initialize` POST succeeds but the MCP
- * client still cannot connect. Almost always the post-handshake headers being
- * blocked by CORS, so lead with that and include the transport's own error.
+ * client still cannot connect. The post-handshake headers are the usual cause,
+ * but the client now retries without the ones it can drop — so when that
+ * happened and the connection still failed, saying so rules the theory out
+ * instead of sending the operator after a header that is already handled.
  */
-export function describeHandshakeOnlyFailure(error: unknown): string {
+export function describeHandshakeOnlyFailure(
+  error: unknown,
+  dropped: readonly string[] = []
+): string {
+  if (dropped.length > 0) {
+    const names = dropped.map(canonicalHeaderName).join(', ');
+    return [
+      'The endpoint answered the initial handshake, but the MCP session could not be established.',
+      '',
+      `This is not the usual CORS header problem: the browser refused ${names}, and retrying without ${dropped.length === 1 ? 'it' : 'them'} did not help either. Something later in the session is failing — check the server log for what it did with the request after the handshake.`,
+      '',
+      `Transport error: ${errorText(error)}`,
+    ].join('\n');
+  }
+
   return [
     'The endpoint answered the initial handshake, but the MCP session could not be established.',
     '',
@@ -520,4 +596,4 @@ export function challengeHeaderOf(error: unknown): string | null {
   return headers?.get?.('WWW-Authenticate') ?? null;
 }
 
-export { issuerStore, sessionStore };
+export { issuerStore };

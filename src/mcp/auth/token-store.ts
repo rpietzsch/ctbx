@@ -79,6 +79,27 @@ export function readClient(serverId: string, issuer: string): StoredClient | und
   return clientStore.get()[bindingKey(serverId, issuer)];
 }
 
+/**
+ * A client registered with this authorization server for *any* MCP server.
+ *
+ * A client ID identifies the application to an authorization server; it is not
+ * bound to a particular resource. So when two configured MCP servers sit behind
+ * the same issuer — the normal case for a suite of services behind one realm —
+ * the second can reuse what the first obtained instead of registering again, or
+ * making the user paste the same client ID twice. The issuer half of the key is
+ * still what scopes the lookup, so the §7.3 binding is preserved; only the
+ * per-server half is relaxed.
+ */
+export function findClientForIssuer(issuer: string): StoredClient | undefined {
+  const suffix = `|${issuer}`;
+  const matches = Object.entries(clientStore.get())
+    .filter(([key]) => key.endsWith(suffix))
+    .map(([, client]) => client);
+
+  // A client the user entered by hand beats one we registered dynamically.
+  return matches.find((client) => client.source === 'pre-registered') ?? matches[0];
+}
+
 export function writeClient(serverId: string, issuer: string, client: StoredClient): void {
   clientStore.update((all) => ({ ...all, [bindingKey(serverId, issuer)]: client }));
 }
