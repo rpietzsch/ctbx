@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProviderId } from '@/config/schema';
-import { configuredProviders } from '@/config/stores';
+import { configuredProviders, preferencesStore, setModelPickerToolsOnly } from '@/config/stores';
+import { useStore } from '@/storage/useStore';
 import { filterModels, getDefinition, listModels } from '@/providers/registry';
 import { mcpManager, useChatStore } from '@/state/chat';
 import { Badge, Button, cx } from '@/ui/primitives';
@@ -31,15 +32,20 @@ export function ModelPicker() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const requireTools = mcpManager.hasConnectedServers();
+  const preferences = useStore(preferencesStore);
+  const toolsOnly = preferences.modelPickerToolsOnly;
+  const serversConnected = mcpManager.hasConnectedServers();
 
+  // Every model is loaded and kept; the tool filter is applied at render time.
+  // Filtering during the fetch meant toggling it re-ran every provider request,
+  // and made "how many are hidden" impossible to answer.
   const loadAll = async (force = false) => {
     const providers = configuredProviders();
     const results = await Promise.all(
       providers.map(async (provider) => {
         const result = await listModels(provider.providerId, force ? { force: true } : {});
         const definition = getDefinition(provider.providerId);
-        return filterModels(result.models, requireTools).map((model): PickableModel => ({
+        return result.models.map((model): PickableModel => ({
           ...model,
           providerId: provider.providerId,
           providerLabel: definition.label,
@@ -59,13 +65,11 @@ export function ModelPicker() {
   };
 
   useEffect(() => {
-    // Fetch-on-mount, and again whenever tool filtering changes. State is set
-    // after awaiting the provider requests; the rule cannot see through the call.
+    // Fetch once on mount. State is set after awaiting the provider requests;
+    // the rule cannot see through the call.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadAll();
-    // loadAll is recreated every render; re-running on that would loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requireTools]);
+  }, []);
 
   // Close on outside click and on Escape.
   useEffect(() => {
@@ -88,7 +92,9 @@ export function ModelPicker() {
     if (open) inputRef.current?.focus();
   }, [open]);
 
-  const results = useMemo(() => searchModels(models, query), [models, query]);
+  const visible = useMemo(() => filterModels(models, toolsOnly), [models, toolsOnly]);
+  const hiddenCount = toolsOnly ? models.length - visible.length : 0;
+  const results = useMemo(() => searchModels(visible, query), [visible, query]);
   const grouped = useMemo(() => groupByProvider(results.slice(0, 100)), [results]);
   const flatResults = useMemo(() => grouped.flatMap(([, list]) => list), [grouped]);
 
@@ -167,6 +173,22 @@ export function ModelPicker() {
             </Button>
           </div>
 
+          <label
+            className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-fg-muted"
+            title="Providers report which models can call tools. OpenRouter publishes it per model; for the others it is inferred from the model family."
+          >
+            <input
+              type="checkbox"
+              checked={toolsOnly}
+              onChange={(event) => {
+                setModelPickerToolsOnly(event.target.checked);
+                setHighlight(0);
+              }}
+            />
+            <span className="flex-1">Only models that support tool calling</span>
+            {hiddenCount > 0 ? <span>{hiddenCount} hidden</span> : null}
+          </label>
+
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain" role="listbox">
             {refreshError ? <p className="px-3 py-2 text-xs text-warn">{refreshError}</p> : null}
 
@@ -233,8 +255,13 @@ export function ModelPicker() {
           </div>
 
           <p className="shrink-0 border-t border-border px-3 py-1.5 text-[0.7rem] text-fg-muted">
-            {requireTools
-              ? 'Only tool-capable models are listed while MCP servers are connected.'
+            {/*
+              Worth saying out loud only in the case that can bite: the filter is
+              off while MCP servers are connected, so the list now includes
+              models that will ignore every one of their tools.
+            */}
+            {!toolsOnly && serversConnected
+              ? 'MCP servers are connected. Models without tool support will ignore their tools.'
               : `${results.length} model${results.length === 1 ? '' : 's'}`}
           </p>
         </div>

@@ -184,7 +184,17 @@ export interface AdaptableServer {
   callTool(name: string, args: unknown, signal?: AbortSignal): Promise<McpToolResult>;
 }
 
-export interface BuildToolsOptions extends ApprovalPolicy {
+export interface BuildToolsOptions {
+  /**
+   * Read afresh for every call, never captured.
+   *
+   * The ToolSet is built once per turn and a turn can run many tool calls, so a
+   * snapshot taken at build time goes stale the moment the user changes a
+   * pre-approval — they tick "always allow read-only", the very next call still
+   * prompts, and the setting looks broken. Resolving the policy at the approval
+   * decision itself is the only way the toggle means what it says.
+   */
+  policy: () => ApprovalPolicy;
   gate: ApprovalGate;
   onAlwaysAllow?: (serverId: string, toolName: string) => void;
 }
@@ -202,7 +212,7 @@ export function buildTools(servers: AdaptableServer[], options: BuildToolsOption
         // round-tripping through zod and risking a lossy conversion.
         inputSchema: jsonSchema((descriptor.inputSchema ?? { type: 'object' }) as never),
         async execute(args: unknown, { abortSignal }: { abortSignal?: AbortSignal }) {
-          if (needsApproval(options, server.id, descriptor)) {
+          if (needsApproval(options.policy(), server.id, descriptor)) {
             const decision = await options.gate.request({
               serverId: server.id,
               serverName: server.name,

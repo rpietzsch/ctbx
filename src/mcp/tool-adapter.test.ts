@@ -212,12 +212,13 @@ describe('normalizeToolResult', () => {
 });
 
 describe('buildTools', () => {
-  const options = {
-    mode: 'always' as const,
+  const policy = (overrides: Partial<ApprovalPolicy> = {}): ApprovalPolicy => ({
+    mode: 'always',
     alwaysAllowedTools: [],
     alwaysAllowedCategories: [],
-    gate: approveAll,
-  };
+    ...overrides,
+  });
+  const options = { policy: () => policy(), gate: approveAll };
 
   it('namespaces every tool', () => {
     const tools = buildTools([makeServer()], options);
@@ -273,13 +274,56 @@ describe('buildTools', () => {
     const gate = { request: vi.fn(async () => ({ approved: true as const })) };
     const tools = buildTools([makeServer()], {
       ...options,
-      alwaysAllowedTools: [alwaysAllowKey('srv-1', 'query')],
+      policy: () => policy({ alwaysAllowedTools: [alwaysAllowKey('srv-1', 'query')] }),
       gate,
     });
 
     await tools['corporate-memory__query']!.execute!({}, {} as never);
 
     expect(gate.request).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The bug this guards: the ToolSet is built once per turn, so a policy read
+   * at build time froze. Ticking "always allow" during a running turn left the
+   * next call still prompting, which reads as the setting being ignored.
+   */
+  it('re-reads the policy for every call, so a mid-turn approval takes effect', async () => {
+    const gate = { request: vi.fn(async () => ({ approved: true as const })) };
+    let allowed: string[] = [];
+    const tools = buildTools([makeServer()], {
+      policy: () => policy({ alwaysAllowedTools: allowed }),
+      gate,
+    });
+
+    await tools['corporate-memory__query']!.execute!({}, {} as never);
+    expect(gate.request).toHaveBeenCalledTimes(1);
+
+    // The user ticks the box while the turn is still running.
+    allowed = [alwaysAllowKey('srv-1', 'query')];
+
+    await tools['corporate-memory__query']!.execute!({}, {} as never);
+    expect(gate.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('picks up a category approval made mid-turn', async () => {
+    const gate = { request: vi.fn(async () => ({ approved: true as const })) };
+    let categories: string[] = [];
+    const server = makeServer({
+      tools: [{ name: 'query', annotations: { readOnlyHint: true } }],
+    });
+    const tools = buildTools([server], {
+      policy: () => policy({ alwaysAllowedCategories: categories }),
+      gate,
+    });
+
+    await tools['corporate-memory__query']!.execute!({}, {} as never);
+    expect(gate.request).toHaveBeenCalledTimes(1);
+
+    categories = [alwaysAllowCategoryKey('srv-1', 'read-only')];
+
+    await tools['corporate-memory__query']!.execute!({}, {} as never);
+    expect(gate.request).toHaveBeenCalledTimes(1);
   });
 
   it('records an always-allow decision', async () => {

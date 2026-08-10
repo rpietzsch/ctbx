@@ -124,11 +124,17 @@ export class McpManager {
 
   /** The aggregated ToolSet handed to `streamText`. */
   tools(overrides?: { approvalMode?: ToolApprovalMode }): ToolSet {
-    const preferences = preferencesStore.get();
     return buildTools(this.adaptableServers(), {
-      mode: overrides?.approvalMode ?? preferences.toolApproval,
-      alwaysAllowedTools: preferences.alwaysAllowedTools,
-      alwaysAllowedCategories: preferences.alwaysAllowedToolCategories,
+      // Re-read on every call: the ToolSet outlives any single preference
+      // change, and a pre-approval made mid-turn has to take effect at once.
+      policy: () => {
+        const preferences = preferencesStore.get();
+        return {
+          mode: overrides?.approvalMode ?? preferences.toolApproval,
+          alwaysAllowedTools: preferences.alwaysAllowedTools,
+          alwaysAllowedCategories: preferences.alwaysAllowedToolCategories,
+        };
+      },
       gate: this.gate,
       onAlwaysAllow: (serverId, toolName) => {
         preferencesStore.update((current) => ({

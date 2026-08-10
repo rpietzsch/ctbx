@@ -98,6 +98,10 @@ export function setToolAlwaysAllowed(key: string, allowed: boolean): void {
   }));
 }
 
+export function setModelPickerToolsOnly(toolsOnly: boolean): void {
+  preferencesStore.update((current) => ({ ...current, modelPickerToolsOnly: toolsOnly }));
+}
+
 export function setToolCategoryAlwaysAllowed(key: string, allowed: boolean): void {
   preferencesStore.update((current) => ({
     ...current,

@@ -196,7 +196,9 @@ describe('createNegotiatingFetch', () => {
     const negotiating = createNegotiatingFetch({ fetchFn });
 
     await expect(
-      negotiating('https://mcp.example.com/mcp', { headers: { 'Content-Type': 'application/json' } })
+      negotiating('https://mcp.example.com/mcp', {
+        headers: { 'Content-Type': 'application/json' },
+      })
     ).rejects.toThrow();
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });

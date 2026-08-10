@@ -144,7 +144,10 @@ export async function validateKey(
   }
 }
 
-/** Filters to tool-capable models when MCP tools are in play (spec §5.3). */
-export function filterModels(models: ModelInfo[], requireTools: boolean): ModelInfo[] {
+/**
+ * Filters to tool-capable models (spec §5.3). Generic so the picker can filter
+ * its own richer model type without losing it.
+ */
+export function filterModels<T extends ModelInfo>(models: T[], requireTools: boolean): T[] {
   return requireTools ? models.filter((model) => model.supportsTools) : models;
 }

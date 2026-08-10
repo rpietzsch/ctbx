@@ -61,6 +61,12 @@ export const preferencesSchema = z.object({
    */
   alwaysAllowedToolCategories: z.array(z.string()).default([]),
   sendOnEnter: z.boolean().default(true),
+  /**
+   * Hide models that cannot call tools from the picker. On by default: this is
+   * an MCP client, and a model that silently ignores every connected tool is a
+   * worse outcome than not seeing it in the list.
+   */
+  modelPickerToolsOnly: z.boolean().default(true),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 
