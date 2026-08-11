@@ -50,8 +50,14 @@ export type ToolApprovalMode = z.infer<typeof toolApprovalModeSchema>;
 export const preferencesSchema = z.object({
   defaultProviderId: providerIdSchema.optional(),
   defaultModelId: z.string().optional(),
-  /** Upper bound on tool-call round trips per turn (spec §6.4). */
-  maxSteps: z.number().int().min(1).max(50).default(10),
+  /**
+   * Upper bound on tool-call round trips per turn (spec §6.4).
+   *
+   * A step is one model generation plus the tools it asked for, so this bounds
+   * round trips rather than tool calls — a step that requests five tools in
+   * parallel still counts once.
+   */
+  maxSteps: z.number().int().min(1).max(50).default(30),
   toolApproval: toolApprovalModeSchema.default('always'),
   /** Tools the user marked "always allow", as `serverId:toolName`. */
   alwaysAllowedTools: z.array(z.string()).default([]),

@@ -33,12 +33,31 @@ export const mcpServerStore = defineStore<McpServerConfig[]>({
   parse: safeParser(mcpServersSchema),
 });
 
+/** The `maxSteps` default before it was raised to 30. See the migration below. */
+const PREVIOUS_DEFAULT_MAX_STEPS = 10;
+
 export const preferencesStore = defineStore<Preferences>({
   name: 'preferences',
-  version: 1,
+  version: 2,
   label: 'Application preferences',
   fallback: () => DEFAULT_PREFERENCES,
   parse: safeParser(preferencesSchema),
+  /**
+   * v1 → v2: the per-turn step budget went from 10 to 30.
+   *
+   * Raising the schema default alone would change nothing for anyone who has
+   * already used the app: every write of any preference persists the whole
+   * object, so an existing install has `maxSteps: 10` on disk and would keep it
+   * forever. Nothing in the UI can set this value, so a stored 10 is the old
+   * default rather than a decision — which makes raising it the point of the
+   * bump. Any other value was set by hand and is left alone.
+   */
+  migrate: (previous, fromVersion) => {
+    if (fromVersion >= 2 || typeof previous !== 'object' || previous === null) return previous;
+    const record = previous as Record<string, unknown>;
+    if (record.maxSteps !== PREVIOUS_DEFAULT_MAX_STEPS) return record;
+    return { ...record, maxSteps: DEFAULT_PREFERENCES.maxSteps };
+  },
 });
 
 export function getProviderConfig(id: ProviderId): ProviderConfig | undefined {

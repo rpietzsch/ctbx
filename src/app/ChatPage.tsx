@@ -109,7 +109,12 @@ export function ChatPage() {
       ) : null}
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        {/*
+          No scroll container here: the transcript owns its own, because it has
+          to know where the reader is before deciding whether to follow new
+          output (see follow-scroll.ts).
+        */}
+        <div className="min-h-0 flex-1">
           <MessageList messages={current?.messages ?? []} streaming={streaming} />
         </div>
 

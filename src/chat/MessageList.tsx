@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { isAtLiveEdge } from './follow-scroll';
 import type { StoredMessage, StoredToolCall } from '@/storage/db';
 import { Badge, cx } from '@/ui/primitives';
 import { formatToolResult, renderMarkdown } from './markdown';
@@ -71,10 +72,46 @@ export function MessageList({
   messages: StoredMessage[];
   streaming: boolean;
 }) {
-  const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  /*
+   * Whether the view is following new output. A ref rather than state: it is
+   * written from a scroll handler that fires continuously, and re-rendering the
+   * whole transcript on every scroll event would be wasteful. Only the "jump to
+   * latest" affordance needs to re-render, and that is its own state.
+   */
+  const followingRef = useRef(true);
+  const [showJump, setShowJump] = useState(false);
+  const messageCountRef = useRef(messages.length);
+
+  const scrollToEnd = (behavior: ScrollBehavior = 'auto') => {
+    const element = scrollRef.current;
+    if (!element) return;
+    // Setting scrollTop directly rather than `scrollIntoView`, which also
+    // scrolls every scrollable ancestor and can shift the whole page.
+    element.scrollTo({ top: element.scrollHeight, behavior });
+  };
+
+  const onScroll = () => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const following = isAtLiveEdge(element);
+    followingRef.current = following;
+    setShowJump(!following);
+  };
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: 'end' });
+    const grew = messages.length > messageCountRef.current;
+    const last = messages[messages.length - 1];
+    messageCountRef.current = messages.length;
+
+    // Sending re-anchors. The user just added to the end of the transcript, so
+    // that is plainly where they mean to be looking, even if they had scrolled
+    // back to read something first.
+    if (grew && last?.role === 'user') followingRef.current = true;
+
+    // No `setShowJump` here on purpose: scrolling raises a scroll event, and
+    // `onScroll` is the single place that decides whether the affordance shows.
+    if (followingRef.current) scrollToEnd();
   }, [messages, streaming]);
 
   if (messages.length === 0) {
@@ -92,54 +129,83 @@ export function MessageList({
   }
 
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6">
-      {messages.map((message) => (
-        <article
-          key={message.id}
-          className={cx('flex flex-col gap-1', message.role === 'user' && 'items-end')}
-        >
-          <div
-            className={cx(
-              'max-w-full rounded-2xl px-4 py-2.5',
-              message.role === 'user' ? 'bg-accent text-accent-fg' : 'bg-surface-2'
-            )}
-          >
-            {message.role === 'user' ? (
-              <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>
-            ) : (
-              <>
-                {message.toolCalls?.map((call) => (
-                  <ToolCallCard key={call.id} call={call} />
-                ))}
-                {message.content ? (
-                  <MarkdownBlock source={message.content} />
-                ) : streaming ? (
-                  <p className="text-sm text-fg-muted">…</p>
-                ) : null}
-              </>
-            )}
+    <div className="relative h-full">
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="h-full overflow-y-auto overscroll-contain"
+      >
+        <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6">
+          {messages.map((message) => (
+            <article
+              key={message.id}
+              className={cx('flex flex-col gap-1', message.role === 'user' && 'items-end')}
+            >
+              <div
+                className={cx(
+                  'max-w-full rounded-2xl px-4 py-2.5',
+                  message.role === 'user' ? 'bg-accent text-accent-fg' : 'bg-surface-2'
+                )}
+              >
+                {message.role === 'user' ? (
+                  <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>
+                ) : (
+                  <>
+                    {message.toolCalls?.map((call) => (
+                      <ToolCallCard key={call.id} call={call} />
+                    ))}
+                    {message.content ? (
+                      <MarkdownBlock source={message.content} />
+                    ) : streaming ? (
+                      <p className="text-sm text-fg-muted">…</p>
+                    ) : null}
+                  </>
+                )}
+              </div>
+
+              {message.error ? (
+                <p role="alert" className="text-xs text-danger">
+                  {message.error}
+                </p>
+              ) : null}
+
+              {message.role === 'assistant' && message.modelId ? (
+                <p className="text-xs text-fg-muted">
+                  {message.modelId}
+                  {message.usage?.outputTokens
+                    ? ` · ${message.usage.outputTokens} output tokens`
+                    : ''}
+                </p>
+              ) : null}
+            </article>
+          ))}
+
+          {/* Announces streamed output to assistive technology. */}
+          <div aria-live="polite" className="sr-only">
+            {streaming ? 'Generating a response' : 'Response complete'}
           </div>
-
-          {message.error ? (
-            <p role="alert" className="text-xs text-danger">
-              {message.error}
-            </p>
-          ) : null}
-
-          {message.role === 'assistant' && message.modelId ? (
-            <p className="text-xs text-fg-muted">
-              {message.modelId}
-              {message.usage?.outputTokens ? ` · ${message.usage.outputTokens} output tokens` : ''}
-            </p>
-          ) : null}
-        </article>
-      ))}
-
-      {/* Announces streamed output to assistive technology. */}
-      <div aria-live="polite" className="sr-only">
-        {streaming ? 'Generating a response' : 'Response complete'}
+        </div>
       </div>
-      <div ref={endRef} />
+
+      {/*
+        Holding position is only reasonable if getting back is one tap — without
+        this the reader has to scroll a long answer by hand to rejoin the
+        stream. Shown whenever the view is away from the edge, and labelled as
+        "generating" while there is more still coming.
+      */}
+      {showJump ? (
+        <button
+          type="button"
+          onClick={() => {
+            followingRef.current = true;
+            setShowJump(false);
+            scrollToEnd('smooth');
+          }}
+          className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full border border-border bg-surface px-3 py-1.5 text-xs shadow-lg"
+        >
+          {streaming ? 'Jump to latest — still generating' : 'Jump to latest'} ↓
+        </button>
+      ) : null}
     </div>
   );
 }
