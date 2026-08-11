@@ -56,7 +56,7 @@ export function ServersPage() {
   }, [servers]);
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-6">
+    <div className="mx-auto max-w-3xl space-y-4 p-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
       <header className="flex items-start justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-lg font-semibold">MCP servers</h1>

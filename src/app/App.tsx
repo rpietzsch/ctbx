@@ -68,7 +68,14 @@ export function App() {
         </nav>
       </header>
 
-      <main className="min-h-0 flex-1">
+      {/*
+        The scroll container for every route that does not manage its own.
+        The body is `overflow: hidden` so the shell scrolls rather than the
+        document — which means this element has to actually offer a scrollbar,
+        or the settings pages simply get clipped. Chat sizes itself to `h-full`
+        and scrolls its message list internally, so it never doubles up here.
+      */}
+      <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <Routes>
           <Route path="/" element={<Navigate to="/chat" replace />} />
           <Route path="/chat" element={<ChatPage />} />

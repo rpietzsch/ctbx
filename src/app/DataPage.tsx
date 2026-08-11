@@ -32,7 +32,7 @@ export function DataPage() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-6">
+    <div className="mx-auto max-w-3xl space-y-4 p-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
       <header className="space-y-1">
         <h1 className="text-lg font-semibold">Stored data</h1>
         <p className="text-sm text-fg-muted">
