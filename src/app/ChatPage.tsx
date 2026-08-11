@@ -11,6 +11,7 @@ export function ChatPage() {
   const { conversations, current, streaming, error, load, select, startNew, remove, send, stop } =
     useChatStore();
   const [draft, setDraft] = useState('');
+  const [drawerOpen, setDrawerOpen] = useState(false);
   // Read once at mount: setting this from inside the effect would cascade renders.
   const [hasProviders] = useState(() => configuredProviders().length > 0);
 
@@ -37,52 +38,105 @@ export function ChatPage() {
 
   if (!hasProviders) return <FirstRun />;
 
+  const conversationList = (
+    <>
+      <div className="p-2">
+        <Button
+          className="w-full"
+          onClick={() => {
+            void startNew();
+            setDrawerOpen(false);
+          }}
+        >
+          New conversation
+        </Button>
+      </div>
+      <ul className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2">
+        {conversations.map((conversation) => (
+          <li key={conversation.id} className="group flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                void select(conversation.id);
+                setDrawerOpen(false);
+              }}
+              className={cx(
+                'min-w-0 flex-1 truncate rounded-lg px-2.5 py-1.5 text-left text-sm',
+                conversation.id === current?.id ? 'bg-surface-3' : 'hover:bg-surface-2'
+              )}
+            >
+              {conversation.title}
+            </button>
+            <button
+              type="button"
+              aria-label={`Delete ${conversation.title}`}
+              onClick={() => void remove(conversation.id)}
+              // Hover-reveal hides it permanently on a touch screen, where
+              // there is no hover — so it stays visible without a pointer.
+              className="rounded px-2 py-1.5 text-xs text-fg-muted md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
+            >
+              ✕
+            </button>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+
   return (
     <div className="flex h-full">
       <aside className="hidden w-60 shrink-0 flex-col border-r border-border md:flex">
-        <div className="p-2">
-          <Button className="w-full" onClick={() => void startNew()}>
-            New conversation
-          </Button>
-        </div>
-        <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-          {conversations.map((conversation) => (
-            <li key={conversation.id} className="group flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => void select(conversation.id)}
-                className={cx(
-                  'min-w-0 flex-1 truncate rounded-lg px-2.5 py-1.5 text-left text-sm',
-                  conversation.id === current?.id ? 'bg-surface-3' : 'hover:bg-surface-2'
-                )}
-              >
-                {conversation.title}
-              </button>
-              <button
-                type="button"
-                aria-label={`Delete ${conversation.title}`}
-                onClick={() => void remove(conversation.id)}
-                className="rounded px-1.5 py-1 text-xs text-fg-muted opacity-0 group-hover:opacity-100 focus:opacity-100"
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        </ul>
+        {conversationList}
       </aside>
 
+      {/*
+        The sidebar is the only way to reach past conversations, and it is
+        hidden below md — so on a phone it becomes a drawer rather than simply
+        not existing.
+      */}
+      {drawerOpen ? (
+        <div className="fixed inset-0 z-30 md:hidden">
+          <button
+            type="button"
+            aria-label="Close conversations"
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setDrawerOpen(false)}
+          />
+          <div className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col border-r border-border bg-surface pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] shadow-2xl">
+            {conversationList}
+          </div>
+        </div>
+      ) : null}
+
       <section className="flex min-w-0 flex-1 flex-col">
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <MessageList messages={current?.messages ?? []} streaming={streaming} />
         </div>
 
-        <div className="shrink-0 border-t border-border p-3">
+        <div
+          className={cx(
+            'shrink-0 border-t border-border p-3',
+            // Clear the home indicator, which otherwise sits over the composer.
+            'pb-[calc(0.75rem+env(safe-area-inset-bottom))]',
+            'pl-[calc(0.75rem+env(safe-area-inset-left))] pr-[calc(0.75rem+env(safe-area-inset-right))]'
+          )}
+        >
           <div className="mx-auto max-w-3xl space-y-2">
             {error ? <ErrorNote>{error}</ErrorNote> : null}
 
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Button
+                className="shrink-0 md:hidden"
+                size="sm"
+                aria-label="Conversations"
+                onClick={() => setDrawerOpen(true)}
+              >
+                ☰
+              </Button>
               <ModelPicker />
-              <McpStatus />
+              <span className="min-w-0 flex-1 text-right">
+                <McpStatus />
+              </span>
             </div>
 
             <div className="flex items-end gap-2">

@@ -37,14 +37,28 @@
 }
 
 @layer base {
+  /*
+   * Installed-PWA sizing. `100%` resolves against a viewport that iOS grows and
+   * shrinks as its toolbars slide, which leaves the app taller than the screen
+   * and scrolling as a whole — the thing that makes a web app feel like a page
+   * instead of an app. `100dvh` tracks the actually-visible box, with `100%` as
+   * the fallback for anything that does not know the unit.
+   */
   html,
   body {
     height: 100%;
+    height: 100dvh;
   }
 
   body {
     background-color: var(--color-surface);
     color: var(--color-fg);
+    /* The shell owns its own scrolling; the document itself never scrolls. */
+    overflow: hidden;
+    /* No rubber-band past the edges, which reads as the page coming loose. */
+    overscroll-behavior: none;
+    /* Stop iOS inflating text when the phone is rotated to landscape. */
+    -webkit-text-size-adjust: 100%;
     font-family:
       ui-sans-serif,
       system-ui,
@@ -71,5 +85,34 @@
       transition-duration: 0.01ms !important;
       scroll-behavior: auto !important;
     }
+  }
+}
+
+/*
+ * Deliberately unlayered.
+ *
+ * iOS Safari zooms the page whenever a focused field's text is smaller than
+ * 16px, and it never zooms back out — which is the whole reason the app had to
+ * be panned around after tapping the composer. The fields carry Tailwind's
+ * `text-sm`, and utilities sit in a later cascade layer than `base`, so a rule
+ * written there would lose. Unlayered declarations outrank every layer, which
+ * is exactly the override this needs.
+ *
+ * Raising the floor only on coarse pointers keeps the pointer-driven layout
+ * compact, and avoids `user-scalable=no`, which would fix the zoom by taking
+ * pinch-zoom away from everyone who needs it.
+ */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+
+  /* Suppress the 300ms tap delay without disabling pinch-zoom. */
+  button,
+  [role='button'],
+  a {
+    touch-action: manipulation;
   }
 }

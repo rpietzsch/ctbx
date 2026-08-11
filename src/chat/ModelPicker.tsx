@@ -149,10 +149,20 @@ export function ModelPicker() {
       {open ? (
         <div
           className={cx(
-            'absolute bottom-full left-0 z-40 mb-2 flex w-[28rem] max-w-[calc(100vw-2rem)] flex-col',
-            // Never taller than the space above the composer.
-            'max-h-[min(26rem,calc(100vh-10rem))]',
-            'overflow-hidden rounded-xl border border-border bg-surface shadow-2xl'
+            'z-40 flex flex-col overflow-hidden border-border bg-surface shadow-2xl',
+            /*
+              Phone: a bottom sheet pinned to the viewport. Anchoring the panel
+              to the trigger cannot work here — the clamp that keeps it narrow
+              enough knows nothing about how far along the row the trigger sits,
+              so the panel hung off the right edge and made the whole page
+              scroll sideways. Pinning to the viewport removes the arithmetic.
+            */
+            'fixed inset-x-0 bottom-0 max-h-[70dvh] rounded-t-xl border-x-0 border-b-0 border-t',
+            'pb-[env(safe-area-inset-bottom)]',
+            // Pointer widths: back to a popover anchored above the trigger.
+            'sm:absolute sm:inset-x-auto sm:bottom-full sm:left-0 sm:mb-2 sm:w-[28rem]',
+            'sm:max-h-[min(26rem,calc(100vh-10rem))] sm:max-w-[calc(100vw-2rem)]',
+            'sm:rounded-xl sm:border sm:pb-0'
           )}
         >
           <div className="flex shrink-0 items-center gap-2 border-b border-border p-2">

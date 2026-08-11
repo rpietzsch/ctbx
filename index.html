@@ -4,11 +4,31 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#0b0d10" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0d10" />
     <meta
       name="description"
       content="Browser-only chat client for multiple LLM providers with remote MCP support."
     />
+
+    <!--
+      Installed-app behaviour on iOS. `apple-mobile-web-app-capable` is the only
+      one Safari honours for standalone launch; the unprefixed name is the
+      standard everything else reads.
+
+      The status bar is left as `default` rather than `black-translucent` on
+      purpose: translucent forces white status-bar text, which disappears
+      against this app's light theme. `default` keeps the bar readable in both
+      themes, and the safe-area padding still handles the home indicator and the
+      landscape notch.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="ctbx" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+
     <title>ctbx</title>
   </head>
   <body class="h-full">

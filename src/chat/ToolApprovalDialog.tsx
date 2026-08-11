@@ -26,7 +26,10 @@ export function ToolApprovalDialog() {
 
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4"
+      // Inset-aware padding: the dialog is the one surface that covers the
+      // whole screen, so on a phone its buttons would otherwise sit under the
+      // home indicator.
+      className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-[calc(1rem+env(safe-area-inset-top))]"
       role="dialog"
       aria-modal="true"
       aria-labelledby="approval-title"

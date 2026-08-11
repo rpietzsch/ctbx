@@ -51,6 +51,11 @@ tasks:
     cmds:
       - npx vite preview --port 4173 --strictPort
 
+  icons:
+    desc: Regenerate the PWA icon set into public/icons/
+    cmds:
+      - node scripts/make-icons.mjs public/icons
+
   clean:
     desc: Remove build output, coverage and caches
     cmds:
