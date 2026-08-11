@@ -28,7 +28,20 @@ export function App() {
           'pl-[calc(1rem+env(safe-area-inset-left))] pr-[calc(1rem+env(safe-area-inset-right))]'
         )}
       >
-        <span className="shrink-0 text-sm font-semibold tracking-tight">ctbx</span>
+        <span className="flex shrink-0 flex-col leading-none">
+          <span className="text-sm font-semibold tracking-tight">ctbx</span>
+          {/*
+            The build's revision. `leading-none` on the stack keeps this from
+            adding a second line's worth of height to a header that has to fit
+            a phone.
+          */}
+          <span
+            className="mt-0.5 font-mono text-[0.6rem] text-fg-muted"
+            title={`Build ${__APP_VERSION__}`}
+          >
+            {__APP_VERSION__}
+          </span>
+        </span>
         {/*
           The four labels do not fit across a phone. Scrolling the nav keeps
           every destination reachable at one tap rather than wrapping the header

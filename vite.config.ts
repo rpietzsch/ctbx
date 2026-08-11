@@ -2,7 +2,33 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+
+/**
+ * The build's git revision, stamped into the UI so a deployed page can be tied
+ * back to a commit — the thing that is otherwise impossible to work out about a
+ * static site someone has had open for a week.
+ *
+ * Evaluated once when the config loads, so `vite dev` freezes it at startup
+ * (including the `-dirty` suffix) until the server restarts. That is the right
+ * trade for a value that only matters in a build.
+ *
+ * Never fails the build: a source tarball, or any checkout without git, simply
+ * reports "unknown".
+ */
+function gitDescribe(): string {
+  try {
+    const described = execSync('git describe --dirty --always', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim();
+    return described === '' ? 'unknown' : described;
+  } catch {
+    return 'unknown';
+  }
+}
 
 // The app is served from a GitHub Pages subpath, not the origin root.
 // This value is load-bearing: it must match Taskfile.yml BASE_PATH, the PWA
@@ -12,6 +38,7 @@ export const BASE_PATH = '/ctbx/';
 
 export default defineConfig({
   base: BASE_PATH,
+  define: { __APP_VERSION__: JSON.stringify(gitDescribe()) },
   plugins: [
     react(),
     tailwindcss(),

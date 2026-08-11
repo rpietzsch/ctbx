@@ -17,7 +17,12 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # Full history and tags: the build stamps `git describe` into the UI, and
+      # the default shallow checkout fetches neither, so every deploy would be
+      # labelled with a bare commit hash even once tags exist.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
