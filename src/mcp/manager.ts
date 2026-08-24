@@ -4,6 +4,8 @@ import { mcpServerStore, preferencesStore } from '@/config/stores';
 import { McpConnection, type ConnectionSnapshot } from './connection';
 import { buildTools, uniqueSlugs, type AdaptableServer, type ApprovalGate } from './tool-adapter';
 import { takeRedirectResult } from './auth/browser';
+import { peekPendingRequest, prunePendingRequests } from './auth/token-store';
+import { AUTHORIZATION_REQUEST_TTL_MS } from './auth/validation';
 
 /**
  * Owns one connection per configured MCP server and aggregates their tools
@@ -87,6 +89,10 @@ export class McpManager {
     await this.connections.get(id)?.disconnect(revoke);
   }
 
+  async signOut(id: string): Promise<void> {
+    await this.connections.get(id)?.signOut();
+  }
+
   /**
    * Resumes an authorization that used the full-page redirect fallback. Called
    * once on boot, before connections are opened (spec §7.5).
@@ -95,12 +101,24 @@ export class McpManager {
     const params = takeRedirectResult();
     if (!params) return false;
 
-    // The pending record names the server, so the result is routed even though
-    // the app has been reloaded and lost its in-memory state.
-    for (const connection of this.list()) {
-      await connection.completeAuthorization(params);
-      if (connection.state === 'connected') return true;
-    }
+    // Route on the `serverId` recorded before the redirect, rather than
+    // offering the response to each connection until one accepts it. The record
+    // is single-use, so whichever connection came first used to consume it
+    // regardless of whom it was for: mostly that just broke redirect-mode
+    // authorization for every server but the first, but with one endpoint
+    // configured twice to hold two accounts the resulting token is
+    // audience-valid for the wrong slot, so it binds with nothing to reject it.
+    const record = params.state ? peekPendingRequest(params.state) : undefined;
+    const connection = record ? this.connections.get(record.serverId) : undefined;
+    if (connection) await connection.completeAuthorization(params);
+
+    // Only the routed record is consumed now, so abandoned ones would otherwise
+    // accumulate — and each holds a PKCE verifier.
+    prunePendingRequests(Date.now(), AUTHORIZATION_REQUEST_TTL_MS);
+
+    // Drained either way. An unroutable response — no state, or a record that
+    // expired or was already used — belongs to no configured server, so there
+    // is nobody to report it to.
     return true;
   }
 

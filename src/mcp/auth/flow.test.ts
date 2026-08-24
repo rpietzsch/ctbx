@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AuthFlowError,
   beginAuthorization,
+  buildEndSessionUrl,
   discoverAuthorizationServerMetadata,
   discoverIssuerAtResourceOrigin,
   discoverProtectedResourceMetadata,
@@ -370,6 +371,86 @@ describe('resolveClient — registration priority (spec §7.3)', () => {
   });
 });
 
+/**
+ * Account resolution rides along with the token request, because the ID token
+ * is available there and deliberately not stored.
+ */
+describe('token exchange account resolution', () => {
+  const tokenInput = {
+    metadata: AS_METADATA,
+    client: { client_id: CIMD_URL, source: 'cimd' as const },
+    redirectUri: REDIRECT_URI,
+    resource: MCP_URL,
+    now: NOW,
+  };
+
+  function idToken(claims: Record<string, unknown>): string {
+    const body = btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(claims))))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    return `header.${body}.signature`;
+  }
+
+  it('names the account from the ID token', async () => {
+    const fetchFn = fakeFetch({
+      [`${ISSUER}/token`]: {
+        body: {
+          access_token: 'access-1',
+          id_token: idToken({ sub: 'abc', preferred_username: 'user-a' }),
+        },
+      },
+    });
+
+    const tokens = await exchangeAuthorizationCode('code', 'verifier', { ...tokenInput, fetchFn });
+
+    expect(tokens.account).toEqual({ subject: 'abc', label: 'user-a', source: 'id_token' });
+  });
+
+  it('falls back to userinfo when the server issued no ID token', async () => {
+    const fetchFn = fakeFetch({
+      [`${ISSUER}/token`]: { body: { access_token: 'access-1' } },
+      [`${ISSUER}/userinfo`]: { body: { sub: 'def', preferred_username: 'user-b' } },
+    });
+
+    const tokens = await exchangeAuthorizationCode('code', 'verifier', {
+      ...tokenInput,
+      metadata: { ...AS_METADATA, userinfo_endpoint: `${ISSUER}/userinfo` },
+      fetchFn,
+    });
+
+    expect(tokens.account).toEqual({ subject: 'def', label: 'user-b', source: 'userinfo' });
+  });
+
+  /** An unattributable login is still a login; it must not fail the exchange. */
+  it('returns the tokens even when the account cannot be resolved', async () => {
+    const fetchFn = fakeFetch({
+      [`${ISSUER}/token`]: { body: { access_token: 'access-1' } },
+    });
+
+    const tokens = await exchangeAuthorizationCode('code', 'verifier', {
+      ...tokenInput,
+      metadata: { ...AS_METADATA, userinfo_endpoint: `${ISSUER}/userinfo` },
+      fetchFn,
+    });
+
+    expect(tokens.access_token).toBe('access-1');
+    expect(tokens.account).toBeUndefined();
+  });
+
+  /** Kept only as `id_token_hint`, so signing out can name the session. */
+  it('keeps the ID token for the logout that ends this session', async () => {
+    const token = idToken({ sub: 'abc' });
+    const fetchFn = fakeFetch({
+      [`${ISSUER}/token`]: { body: { access_token: 'access-1', id_token: token } },
+    });
+
+    const tokens = await exchangeAuthorizationCode('code', 'verifier', { ...tokenInput, fetchFn });
+
+    expect(tokens.id_token).toBe(token);
+  });
+});
+
 describe('beginAuthorization', () => {
   const input = {
     serverId: 'srv-1',
@@ -574,5 +655,49 @@ describe('revokeToken', () => {
         fetchFn
       )
     ).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * Clearing a token locally is not signing out: the authorization server still
+ * holds the browser session that issued it, and answers the next authorization
+ * request from that session without a sign-in screen.
+ */
+describe('buildEndSessionUrl', () => {
+  const client = { client_id: 'ctbx', source: 'cimd' as const };
+  const POST_LOGOUT = 'https://rpietzsch.github.io/ctbx/oauth/callback.html';
+  const END_SESSION = `${ISSUER}/logout`;
+
+  function build(metadata: AuthorizationServerMetadata, idToken?: string): URL | undefined {
+    const url = buildEndSessionUrl({
+      metadata,
+      client,
+      idToken,
+      postLogoutRedirectUri: POST_LOGOUT,
+    });
+    return url ? new URL(url) : undefined;
+  }
+
+  it('names the session with the ID token, so no confirmation is needed', () => {
+    const url = build({ ...AS_METADATA, end_session_endpoint: END_SESSION }, 'the-id-token');
+    expect(url?.searchParams.get('id_token_hint')).toBe('the-id-token');
+  });
+
+  it('identifies the client and where to come back to', () => {
+    const url = build({ ...AS_METADATA, end_session_endpoint: END_SESSION });
+    expect(url).toBeDefined();
+    expect(url!.origin + url!.pathname).toBe(END_SESSION);
+    expect(url?.searchParams.get('client_id')).toBe('ctbx');
+    expect(url?.searchParams.get('post_logout_redirect_uri')).toBe(POST_LOGOUT);
+  });
+
+  it('omits the hint when no ID token was kept', () => {
+    const url = build({ ...AS_METADATA, end_session_endpoint: END_SESSION });
+    expect(url?.searchParams.has('id_token_hint')).toBe(false);
+  });
+
+  /** Nothing to do — the local credentials are still cleared. */
+  it('yields nothing when the server publishes no logout endpoint', () => {
+    expect(build(AS_METADATA)).toBeUndefined();
   });
 });

@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import { defineStore } from '@/storage/local';
 import { safeParser } from '@/config/schema';
+import { storedAccountSchema } from './account';
 
 export const storedTokensSchema = z.object({
   access_token: z.string(),
@@ -20,6 +21,21 @@ export const storedTokensSchema = z.object({
   obtainedAt: z.number(),
   /** Absolute epoch ms of expiry, when the server told us. */
   expiresAt: z.number().optional(),
+  /**
+   * Who the token belongs to, when the authorization server said. Derived from
+   * the login rather than returned by it, so it lives and dies with the token
+   * it describes — which is what makes it trustworthy as a label for this slot.
+   */
+  account: storedAccountSchema.optional(),
+  /**
+   * The ID token, kept solely as `id_token_hint` for RP-initiated logout.
+   *
+   * Nothing reads it as an assertion — the account label is resolved once at
+   * login and stored separately. It is here because ending the session at the
+   * authorization server needs to name which session, and by then the response
+   * that carried it is long gone.
+   */
+  id_token: z.string().optional(),
 });
 export type StoredTokens = z.infer<typeof storedTokensSchema>;
 
@@ -135,6 +151,7 @@ export function toStoredTokens(
     refresh_token?: string;
     scope?: string;
     expires_in?: number;
+    id_token?: string;
   },
   now: number
 ): StoredTokens {
@@ -143,6 +160,7 @@ export function toStoredTokens(
     token_type: response.token_type ?? 'Bearer',
     ...(response.refresh_token ? { refresh_token: response.refresh_token } : {}),
     ...(response.scope ? { scope: response.scope } : {}),
+    ...(response.id_token ? { id_token: response.id_token } : {}),
     obtainedAt: now,
     ...(response.expires_in !== undefined ? { expiresAt: now + response.expires_in * 1000 } : {}),
   };
@@ -180,6 +198,18 @@ export const pendingAuthStore = defineStore<Record<string, z.infer<typeof pendin
 
 export function savePendingRequest(record: z.infer<typeof pendingRequestSchema>): void {
   pendingAuthStore.update((all) => ({ ...all, [record.state]: record }));
+}
+
+/**
+ * Reads a pending request without consuming it, so a caller can find out which
+ * server an authorization response belongs to before acting on it. Consuming
+ * first and asking afterwards is not equivalent: the record is single-use, so a
+ * wrong guess destroys the response for the server that actually owns it.
+ */
+export function peekPendingRequest(
+  state: string
+): z.infer<typeof pendingRequestSchema> | undefined {
+  return pendingAuthStore.get()[state];
 }
 
 export function takePendingRequest(

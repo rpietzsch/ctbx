@@ -26,6 +26,7 @@ import {
   NATIVE_CLIENT_NOTE,
 } from '../cors-remedy';
 import { createPkcePair, generateState } from './pkce';
+import { resolveAccount } from './account';
 import {
   savePendingRequest,
   toStoredTokens,
@@ -64,7 +65,9 @@ export interface AuthorizationServerMetadata {
   token_endpoint: string;
   registration_endpoint?: string;
   revocation_endpoint?: string;
+  end_session_endpoint?: string;
   scopes_supported?: string[];
+  userinfo_endpoint?: string;
   code_challenge_methods_supported?: string[];
   client_id_metadata_document_supported?: boolean;
   authorization_response_iss_parameter_supported?: boolean;
@@ -430,6 +433,7 @@ async function requestToken(
     refresh_token?: string;
     scope?: string;
     expires_in?: number;
+    id_token?: string;
   };
 
   if (!body.access_token) {
@@ -439,7 +443,23 @@ async function requestToken(
     );
   }
 
-  return toStoredTokens({ ...body, access_token: body.access_token }, input.now ?? Date.now());
+  const tokens = toStoredTokens(
+    { ...body, access_token: body.access_token },
+    input.now ?? Date.now()
+  );
+
+  // Resolved here rather than by the caller because this is where the ID token
+  // arrives, and resolving once at login beats re-deriving the label from a
+  // token that is only kept as a logout hint. Best effort throughout — a login
+  // that works but cannot be attributed is still a working login.
+  const account = await resolveAccount({
+    idToken: body.id_token,
+    accessToken: tokens.access_token,
+    userinfoEndpoint: input.metadata.userinfo_endpoint,
+    fetchFn: input.fetchFn,
+  });
+
+  return account ? { ...tokens, account } : tokens;
 }
 
 export async function exchangeAuthorizationCode(
@@ -469,6 +489,38 @@ export async function refreshAccessToken(
   // Servers may omit the refresh token on rotation-free renewals; keep the old
   // one so the session does not silently become non-renewable.
   return tokens.refresh_token ? tokens : { ...tokens, refresh_token: refreshToken };
+}
+
+export interface EndSessionInput {
+  metadata: AuthorizationServerMetadata;
+  client: StoredClient;
+  /** OIDC `id_token_hint`; see `StoredTokens.id_token` for why it is kept. */
+  idToken?: string | undefined;
+  postLogoutRedirectUri: string;
+}
+
+/**
+ * The RP-initiated logout URL (OIDC RP-Initiated Logout 1.0), or `undefined`
+ * when the authorization server publishes no `end_session_endpoint`.
+ *
+ * Revoking a token does not end the browser session that produced it. The
+ * authorization server's own cookie outlives it, so the next authorization
+ * request is answered from that session without a sign-in screen — which is
+ * what makes it impossible to change accounts by clearing local state alone.
+ * Only a front-channel logout reaches that cookie.
+ *
+ * `id_token_hint` is what identifies the session being ended. Without it a
+ * server may reasonably interpose a confirmation page instead, since it has no
+ * way to know which session the request means.
+ */
+export function buildEndSessionUrl(input: EndSessionInput): string | undefined {
+  if (!input.metadata.end_session_endpoint) return undefined;
+
+  const url = new URL(input.metadata.end_session_endpoint);
+  url.searchParams.set('client_id', input.client.client_id);
+  url.searchParams.set('post_logout_redirect_uri', input.postLogoutRedirectUri);
+  if (input.idToken) url.searchParams.set('id_token_hint', input.idToken);
+  return url.toString();
 }
 
 export async function revokeToken(

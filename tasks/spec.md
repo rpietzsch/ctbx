@@ -227,6 +227,24 @@ interface McpServerConfig {
 Everything else — whether auth is needed at all, which authorization server, which endpoints, which
 scopes — is discovered (§7.1). Adding an unauthenticated server means filling in two fields.
 
+**Two accounts on one endpoint.** Nothing dedupes on `url`, and every credential is keyed by
+`serverId` (§7.6), so the same endpoint may be configured twice to hold two different identities —
+scoping each connection to what that account may see. What does not follow automatically is the
+*login*: the authorization popup shares the browser's cookie jar, so an authorization silently rides
+whatever SSO session already exists and returns that subject.
+
+OIDC's `prompt` and `login_hint` look like the answer and are not. Against an authorization server
+that permits one session per browser — Keycloak, the case that matters here — `prompt=login` does not
+start a fresh login but re-authenticates the *existing* session's user, taking that username over
+`login_hint` and rendering it read-only. Sending them buys a configuration field and no control, so
+ctbx does not.
+
+What works is discarding the credentials and signing in again: **sign out** (§7.6) is separate from
+disconnecting for exactly this reason. The pairing is workable rather than airtight — the second
+sign-in ends the first account's session, which depending on how the AS binds refresh tokens to
+sessions can invalidate the first connection's refresh token — so each connection also **shows the
+account it holds** (§7.6) rather than leaving it to be assumed.
+
 ### 6.3 Tool adaptation
 
 Each connected server's `tools/list` result is converted to AI SDK tools:
@@ -367,6 +385,15 @@ No URI normalization before comparison — no case folding, no default-port elis
 fixups. On mismatch, do not act on or display `error`/`error_description`/`error_uri`. Also verify
 `state` matches.
 
+**Routing.** The pending record names the server that started the request, and the redirect path
+dispatches on it — the response is never offered to each connection in turn until one accepts. The
+record is single-use, so a connection that answers for someone else destroys the response for its
+owner; and with one endpoint configured twice (§6.2) the resulting token is audience-valid for the
+wrong slot, so nothing downstream rejects it and the connection binds to the wrong account. A
+connection also refuses, without consuming, any record naming a different server. A response that
+routes nowhere — no `state`, or a record already used or expired — belongs to no configured server
+and is dropped.
+
 ### 7.6 Tokens
 
 - Stored in `localStorage` keyed by `(server id, AS issuer)`, alongside expiry and granted scopes.
@@ -377,6 +404,39 @@ fixups. On mismatch, do not act on or display `error`/`error_description`/`error
   across configured servers.
 - Disconnecting a server clears its tokens; revocation is called if the AS exposes a
   `revocation_endpoint`.
+
+**Which account the token belongs to.** Resolved as part of the token request and stored with the
+token, so it lives and dies with what it describes. The ID token first — already in hand, no request,
+nothing for CORS to block — and `userinfo_endpoint` as the fallback when `openid` was not among the
+granted scopes. Both are read for display and nothing else, so the ID token's signature is not
+verified: it came straight from the token endpoint over TLS, which OIDC Core §3.1.3.7 accepts as
+sufficient, and a forged claim would buy a wrong name on screen and no access. The ID token itself is
+never stored — only the `sub` and a readable label (`preferred_username`, else `email`, else `name`,
+else the subject).
+
+**Sign out** discards a server's stored credentials while leaving it configured, and is separate
+from disconnecting, which closes the session and deliberately keeps the token so reconnecting is
+free. It is the only way to change the account a server is connected as short of deleting the
+server: `connect()` reuses whatever is stored, so while a token is held `authorize()` never runs and
+no sign-in screen is ever reached.
+
+Clearing the token is only half of it. The authorization server holds a browser session of its own
+that outlives any token, and answers the next authorization request from it — silently, as the same
+user. So sign out also runs an **RP-initiated logout** (OIDC RP-Initiated Logout 1.0) against
+`end_session_endpoint` in a popup, falling back to a full-page redirect when popups are blocked, and
+back to clearing local state alone when the server publishes no such endpoint. `id_token_hint` names
+the session being ended, which is the only reason the ID token is stored at all; without it a server
+may interpose a confirmation page, having no way to know which session is meant.
+
+This ends the session for every server behind that issuer, not just this one — one browser session is
+all there is. Their tokens keep working until expiry, then their refresh fails and they need
+authorizing again. Unavoidable: it is the same session that made the silent re-login possible.
+
+Resolution is best-effort end to end: userinfo is rarely CORS-enabled, and a login that cannot be
+attributed is still a working login. A refresh response carries no ID token, so the account
+established at login is carried forward on renewal, like the refresh token itself. Each connection
+shows the account it holds — the only thing distinguishing two configs on one endpoint (§6.2), and
+the only way to notice that a silent re-authorization rebound a slot.
 
 ### 7.7 SDK reliance — resolved
 

@@ -209,6 +209,15 @@ function ServerCard({
               Diagnose
             </Button>
           ) : null}
+          {config.enabled && snapshot?.hasToken ? (
+            <Button
+              disabled={busy}
+              title="Discards the stored token and ends the session at the identity provider, so the next authorization asks who you are. The server stays configured."
+              onClick={() => void run(() => mcpManager.signOut(config.id))}
+            >
+              Sign out
+            </Button>
+          ) : null}
           <Button onClick={onEdit}>Edit</Button>
           <Button
             variant="ghost"
@@ -237,6 +246,26 @@ function ServerCard({
           but the server should list{' '}
           {snapshot.droppedHeaders.length === 1 ? 'that header' : 'those headers'} in
           Access-Control-Allow-Headers.
+        </p>
+      ) : null}
+
+      {snapshot?.hasToken ? (
+        <p className="text-xs">
+          {snapshot.account ? (
+            <>
+              {state === 'connected' ? 'Signed in as ' : 'Token held for '}
+              <strong className="font-medium" title={`sub: ${snapshot.account.subject}`}>
+                {snapshot.account.label}
+              </strong>
+              {snapshot.account.source === 'userinfo' ? ' (via userinfo)' : ''}
+            </>
+          ) : (
+            <span className="text-fg-muted">
+              The authorization server did not say which account this token is for. Add{' '}
+              <code>openid</code> to Scopes, or check that its userinfo endpoint is reachable from a
+              browser.
+            </span>
+          )}
         </p>
       ) : null}
 

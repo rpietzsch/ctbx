@@ -16,6 +16,7 @@ import type { McpToolDescriptor, McpToolResult } from './tool-adapter';
 import {
   AuthFlowError,
   beginAuthorization,
+  buildEndSessionUrl,
   discoverAuthorizationServerMetadata,
   discoverIssuerAtResourceOrigin,
   discoverProtectedResourceMetadata,
@@ -31,6 +32,7 @@ import {
   clearClient,
   clearTokens,
   findClientForIssuer,
+  peekPendingRequest,
   readClient,
   readTokens,
   shouldRefresh,
@@ -40,11 +42,14 @@ import {
   type StoredClient,
   type StoredTokens,
 } from './auth/token-store';
+import type { StoredAccount } from './auth/account';
 import {
   clientMetadataDocument,
   clientMetadataUrl,
   openAuthorizationPopup,
+  openLogoutPopup,
   redirectToAuthorization,
+  redirectToEndSession,
   redirectUri,
 } from './auth/browser';
 import { validateCallback, type CallbackParams } from './auth/validation';
@@ -63,6 +68,12 @@ export interface ConnectionSnapshot {
   issuer?: string;
   grantedScopes?: string;
   tokenExpiresAt?: number;
+  /**
+   * Who this connection is authenticated as, when the authorization server said
+   * so. The one thing that distinguishes two configs on the same endpoint held
+   * by two different accounts (spec §6.2).
+   */
+  account?: StoredAccount;
   /** Whether an access token is stored, regardless of whether it works. */
   hasToken?: boolean;
   /**
@@ -107,7 +118,29 @@ export class McpConnection {
     public config: McpServerConfig,
     private fetchFn: typeof fetch = (...args) => fetch(...args)
   ) {
-    this.snapshot = { serverId: config.id, state: 'disconnected', tools: [] };
+    // Seeded from storage rather than left blank until the first connection
+    // attempt: which account a server holds a token for is exactly what someone
+    // wants to see on opening the page, and two configs on one endpoint are
+    // otherwise indistinguishable until one of them connects.
+    this.snapshot = {
+      serverId: config.id,
+      state: 'disconnected',
+      tools: [],
+      ...this.credentialFields(),
+    };
+  }
+
+  /** The snapshot fields derived from what is stored for this server. */
+  private credentialFields(): Partial<ConnectionSnapshot> {
+    const issuer = this.issuer();
+    const tokens = this.tokens();
+    return {
+      hasToken: tokens !== undefined,
+      account: tokens?.account,
+      ...(issuer ? { issuer } : {}),
+      ...(tokens?.scope ? { grantedScopes: tokens.scope } : {}),
+      ...(tokens?.expiresAt ? { tokenExpiresAt: tokens.expiresAt } : {}),
+    };
   }
 
   get state(): ConnectionState {
@@ -195,6 +228,9 @@ export class McpConnection {
         ...(issuer ? { issuer } : {}),
         ...(tokens?.scope ? { grantedScopes: tokens.scope } : {}),
         ...(tokens?.expiresAt ? { tokenExpiresAt: tokens.expiresAt } : {}),
+        // Assigned rather than spread: a connection that lost its account must
+        // stop claiming the old one, which is the case the display exists for.
+        account: tokens?.account,
       });
       this.stepUpAttempts = 0;
     } catch (error) {
@@ -261,6 +297,7 @@ export class McpConnection {
         error: diagnosis.message,
         diagnosis,
         hasToken: tokens !== undefined,
+        account: tokens?.account,
       });
       return;
     }
@@ -278,6 +315,7 @@ export class McpConnection {
         error: describeHandshakeOnlyFailure(error, this.negotiating?.dropped),
         diagnosis,
         hasToken: tokens !== undefined,
+        account: tokens?.account,
       });
       return;
     }
@@ -287,6 +325,7 @@ export class McpConnection {
       error: diagnosis.message,
       diagnosis,
       hasToken: tokens !== undefined,
+      account: tokens?.account,
     });
   }
 
@@ -412,6 +451,14 @@ export class McpConnection {
     metadata?: AuthorizationServerMetadata,
     client?: StoredClient
   ): Promise<void> {
+    // Refuse a response that belongs to a different server, without consuming
+    // it. The record is single-use, so answering for someone else both loses
+    // the response for its owner and — when one endpoint is configured twice
+    // for two accounts — writes a token that is audience-valid for this slot
+    // and silently binds it to the wrong identity.
+    const pending = params.state ? peekPendingRequest(params.state) : undefined;
+    if (pending && pending.serverId !== this.config.id) return;
+
     const validation = validateCallback(params, (state) => takePendingRequest(state));
     if (!validation.ok) {
       this.emit({ state: 'needs-auth', error: validation.message });
@@ -462,8 +509,19 @@ export class McpConnection {
         fetchFn: this.fetchFn,
         ...(tokens.scope ? { scope: tokens.scope } : {}),
       });
-      writeTokens(this.config.id, issuer, refreshed);
-      return refreshed;
+      // A refresh response usually carries no ID token, and userinfo may be
+      // unreachable from a browser. Keeping the account already established for
+      // this token is better than letting the connection go anonymous on
+      // renewal — same reasoning as the refresh token itself.
+      const carried = refreshed.account ?? tokens.account;
+      const idToken = refreshed.id_token ?? tokens.id_token;
+      const result = {
+        ...refreshed,
+        ...(carried ? { account: carried } : {}),
+        ...(idToken ? { id_token: idToken } : {}),
+      };
+      writeTokens(this.config.id, issuer, result);
+      return result;
     } catch {
       return undefined;
     }
@@ -498,7 +556,7 @@ export class McpConnection {
       ...(tokens?.access_token ? { token: tokens.access_token } : {}),
       ...(issuer ? { issuer } : {}),
     });
-    this.emit({ diagnosis, hasToken: tokens !== undefined });
+    this.emit({ diagnosis, hasToken: tokens !== undefined, account: tokens?.account });
     return diagnosis;
   }
 
@@ -536,7 +594,76 @@ export class McpConnection {
     }
     this.client = undefined;
     this.negotiating = undefined;
-    this.emit({ state: 'disconnected', tools: [], error: undefined, droppedHeaders: [] });
+    this.emit({
+      state: 'disconnected',
+      tools: [],
+      error: undefined,
+      droppedHeaders: [],
+      // Only a revoking disconnect drops the credential fields. A plain one
+      // keeps the token, so the card should go on saying which account is held
+      // — the point of showing it is to know before reconnecting, not after.
+      ...(revoke
+        ? {
+            hasToken: false,
+            account: undefined,
+            grantedScopes: undefined,
+            tokenExpiresAt: undefined,
+          }
+        : {}),
+    });
+  }
+
+  /**
+   * Discards the credentials held for this server.
+   *
+   * Distinct from `disconnect`, which closes the session and deliberately keeps
+   * the token so reconnecting is free. Without a way to discard it there is no
+   * way to change the account a server is connected as short of deleting the
+   * server: `connect()` reuses whatever is stored, so `authorize()` — and with
+   * it the per-server `prompt` (spec §6.2) — is never reached.
+   */
+  async signOut(): Promise<void> {
+    // Built before anything is cleared: the logout request has to name the
+    // session it ends, and the ID token and client that identify it are about
+    // to be discarded.
+    const endSessionUrl = await this.endSessionUrl();
+
+    await this.disconnect(true);
+    // Authorization was required to obtain the token just discarded, so it is
+    // required again. Saying so beats making the user rediscover it by way of
+    // a connection attempt that fails.
+    this.emit({ state: 'needs-auth' });
+
+    // Clearing the token locally is not signing out. The authorization server
+    // still holds the browser session that issued it and will answer the next
+    // authorization request from that session — no sign-in screen, same
+    // account. Ending it here is what makes a different login possible.
+    if (endSessionUrl && !(await openLogoutPopup(endSessionUrl))) {
+      redirectToEndSession(endSessionUrl);
+    }
+  }
+
+  /** The RP-initiated logout URL for the credentials currently held. */
+  private async endSessionUrl(): Promise<string | undefined> {
+    const issuer = this.issuer();
+    if (!issuer) return undefined;
+
+    const client = readClient(this.config.id, issuer);
+    if (!client) return undefined;
+
+    try {
+      const metadata = await discoverAuthorizationServerMetadata(issuer, this.fetchFn);
+      return buildEndSessionUrl({
+        metadata,
+        client,
+        idToken: readTokens(this.config.id, issuer)?.id_token,
+        postLogoutRedirectUri: redirectUri(),
+      });
+    } catch {
+      // Best effort: a server we cannot reach for metadata still gets its local
+      // credentials cleared.
+      return undefined;
+    }
   }
 }
 

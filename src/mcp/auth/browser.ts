@@ -120,6 +120,68 @@ export function redirectToAuthorization(authorizationUrl: string): void {
 }
 
 /**
+ * Runs a front-channel logout in a popup and resolves once it is over.
+ *
+ * Deliberately more forgiving than the authorization popup: nothing comes back
+ * from a logout that the app needs, so every ending — the callback page posting
+ * back, the user closing the window, or the timeout — is success. What matters
+ * is that the request reached the authorization server, and a redirect that
+ * lands anywhere has already done that.
+ *
+ * Resolves `false` only when no popup could be opened, so the caller can fall
+ * back to a full-page redirect.
+ */
+export function openLogoutPopup(
+  endSessionUrl: string,
+  options: { timeoutMs?: number } = {}
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const popup = globalThis.open(
+      endSessionUrl,
+      'ctbx-logout',
+      'width=520,height=680,menubar=no,toolbar=no'
+    );
+    if (!popup) {
+      resolve(false);
+      return;
+    }
+
+    const expectedOrigin = new URL(appBaseUrl()).origin;
+    let settled = false;
+
+    function finish() {
+      if (settled) return;
+      settled = true;
+      globalThis.removeEventListener('message', onMessage);
+      clearInterval(closedTimer);
+      clearTimeout(timeoutTimer);
+      popup?.close();
+      resolve(true);
+    }
+
+    function onMessage(event: MessageEvent) {
+      if (event.origin !== expectedOrigin) return;
+      const data = event.data as { type?: string } | null;
+      if (data?.type === CALLBACK_MESSAGE_TYPE) finish();
+    }
+
+    globalThis.addEventListener('message', onMessage);
+    const closedTimer = setInterval(() => {
+      if (popup.closed) finish();
+    }, 500);
+    // An authorization server that neither redirects back nor accepts our
+    // post-logout URI leaves the window sitting on its own page. The logout
+    // itself already happened on the request, so waiting longer gains nothing.
+    const timeoutTimer = setTimeout(finish, options.timeoutMs ?? 20_000);
+  });
+}
+
+/** Full-page fallback for the logout when a popup cannot be opened. */
+export function redirectToEndSession(endSessionUrl: string): void {
+  globalThis.location.assign(endSessionUrl);
+}
+
+/**
  * Drains a redirect-mode result stashed by `callback.html`. Called once on app
  * boot, before anything else looks at connection state.
  */
