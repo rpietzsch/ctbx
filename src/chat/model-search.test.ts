@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   formatContextWindow,
   formatPricePerMillion,
+  formatPricing,
+  formatPricingTitle,
   groupByProvider,
   modelKey,
   parseModelKey,
@@ -123,6 +125,30 @@ describe('formatting', () => {
   it('omits price when it is absent or free', () => {
     expect(formatPricePerMillion(undefined)).toBeUndefined();
     expect(formatPricePerMillion(0)).toBeUndefined();
+  });
+
+  it('combines input and output price into one fact', () => {
+    expect(formatPricing({ prompt: 0.000015, completion: 0.000075 })).toBe('$15.0/$75.0/M');
+    expect(formatPricing({ prompt: 0.0000005, completion: 0.0000015 })).toBe('$0.50/$1.5/M');
+  });
+
+  it('labels the side when a provider reports only one price', () => {
+    expect(formatPricing({ prompt: 0.000015 })).toBe('$15.0/M in');
+    expect(formatPricing({ completion: 0.000075 })).toBe('$75.0/M out');
+  });
+
+  it('omits the price fact when no side is priced', () => {
+    expect(formatPricing(undefined)).toBeUndefined();
+    expect(formatPricing({})).toBeUndefined();
+    expect(formatPricing({ prompt: 0, completion: 0 })).toBeUndefined();
+  });
+
+  it('spells out both sides for the hover title', () => {
+    expect(formatPricingTitle({ prompt: 0.000015, completion: 0.000075 })).toBe(
+      'Input $15.0/M · Output $75.0/M'
+    );
+    expect(formatPricingTitle({ completion: 0.000075 })).toBe('Output $75.0/M');
+    expect(formatPricingTitle(undefined)).toBeUndefined();
   });
 
   it('abbreviates context windows', () => {

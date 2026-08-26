@@ -8,13 +8,46 @@ export interface PickableModel extends ModelInfo {
   key: string;
 }
 
-/** Formats USD-per-token as the more readable USD per million tokens. */
-export function formatPricePerMillion(perToken: number | undefined): string | undefined {
+/**
+ * USD-per-token as a bare per-million amount, with the precision scaled to the
+ * magnitude so cheap models keep their cents and expensive ones stay short.
+ */
+function perMillionAmount(perToken: number | undefined): string | undefined {
   if (perToken === undefined || perToken <= 0) return undefined;
   const perMillion = perToken * 1_000_000;
-  if (perMillion < 1) return `$${perMillion.toFixed(2)}/M`;
-  if (perMillion < 100) return `$${perMillion.toFixed(1)}/M`;
-  return `$${perMillion.toFixed(0)}/M`;
+  if (perMillion < 1) return perMillion.toFixed(2);
+  if (perMillion < 100) return perMillion.toFixed(1);
+  return perMillion.toFixed(0);
+}
+
+/** Formats USD-per-token as the more readable USD per million tokens. */
+export function formatPricePerMillion(perToken: number | undefined): string | undefined {
+  const amount = perMillionAmount(perToken);
+  return amount === undefined ? undefined : `$${amount}/M`;
+}
+
+/**
+ * Input and output price as a single picker fact: `$15/$75/M` is in/out per
+ * million tokens. Only OpenRouter reports both, so the one-sided fallbacks are
+ * suffixed — an unlabelled lone number would read as the input price.
+ */
+export function formatPricing(pricing: ModelInfo['pricing']): string | undefined {
+  const input = perMillionAmount(pricing?.prompt);
+  const output = perMillionAmount(pricing?.completion);
+  if (input !== undefined && output !== undefined) return `$${input}/$${output}/M`;
+  if (input !== undefined) return `$${input}/M in`;
+  if (output !== undefined) return `$${output}/M out`;
+  return undefined;
+}
+
+/** Spells the combined fact out for the hover title, which has room for words. */
+export function formatPricingTitle(pricing: ModelInfo['pricing']): string | undefined {
+  const parts = [
+    formatPricePerMillion(pricing?.prompt) && `Input ${formatPricePerMillion(pricing?.prompt)}`,
+    formatPricePerMillion(pricing?.completion) &&
+      `Output ${formatPricePerMillion(pricing?.completion)}`,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length === 0 ? undefined : parts.join(' · ');
 }
 
 export function formatContextWindow(tokens: number | undefined): string | undefined {

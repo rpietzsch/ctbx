@@ -7,7 +7,8 @@ import { mcpManager, useChatStore } from '@/state/chat';
 import { Badge, Button, cx } from '@/ui/primitives';
 import {
   formatContextWindow,
-  formatPricePerMillion,
+  formatPricing,
+  formatPricingTitle,
   groupByProvider,
   modelKey,
   searchModels,
@@ -219,9 +220,14 @@ export function ModelPicker() {
                   {list.map((model) => {
                     const index = flatResults.indexOf(model);
                     const facts = [
-                      formatContextWindow(model.contextWindow),
-                      formatPricePerMillion(model.pricing?.prompt),
-                    ].filter(Boolean);
+                      { text: formatContextWindow(model.contextWindow), title: 'Context window' },
+                      {
+                        text: formatPricing(model.pricing),
+                        title: formatPricingTitle(model.pricing),
+                      },
+                    ].filter((fact): fact is { text: string; title: string | undefined } =>
+                      Boolean(fact.text)
+                    );
 
                     return (
                       <button
@@ -245,8 +251,8 @@ export function ModelPicker() {
                         <span className="flex w-full items-center gap-2 text-[0.7rem] text-fg-muted">
                           <span className="min-w-0 flex-1 truncate font-mono">{model.id}</span>
                           {facts.map((fact) => (
-                            <span key={fact} className="shrink-0">
-                              {fact}
+                            <span key={fact.text} className="shrink-0" title={fact.title}>
+                              {fact.text}
                             </span>
                           ))}
                         </span>

@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { isAtLiveEdge } from './follow-scroll';
 import type { StoredMessage, StoredToolCall } from '@/storage/db';
 import { Badge, cx } from '@/ui/primitives';
+import { modelCacheStore } from '@/providers/registry';
+import { useStore } from '@/storage/useStore';
 import { formatToolResult, renderMarkdown } from './markdown';
+import { estimateCost, formatCost, formatUsage } from './usage';
 
 function MarkdownBlock({ source }: { source: string }) {
   const html = useMemo(() => renderMarkdown(source), [source]);
@@ -13,6 +16,41 @@ function MarkdownBlock({ source }: { source: string }) {
       // removed. Model output and tool results are untrusted (spec §9.3).
       dangerouslySetInnerHTML={{ __html: html }}
     />
+  );
+}
+
+/**
+ * Model, token counts and cost under an assistant turn. The input count is the
+ * one worth surfacing when MCP tools are in play: every step re-sends the whole
+ * transcript plus the tool schemas, so it grows far faster than the visible
+ * answer does — and the price tag turns that into the number that matters.
+ *
+ * Prices come from the cached model list rather than the message, so the whole
+ * transcript is costed retroactively. The flip side is that a turn goes back to
+ * showing tokens alone once its model leaves the provider's list.
+ */
+function MessageFooter({ message }: { message: StoredMessage }) {
+  const modelCache = useStore(modelCacheStore);
+  if (message.role !== 'assistant' || !message.modelId) return null;
+
+  const usage = formatUsage(message.usage);
+  const pricing = message.providerId
+    ? modelCache[message.providerId]?.models.find((model) => model.id === message.modelId)?.pricing
+    : undefined;
+  const cost = estimateCost(message.usage, pricing);
+
+  return (
+    <p className="text-xs text-fg-muted">
+      {message.modelId}
+      {usage ? (
+        <span title="Totals for the whole turn, including every tool step">{` · ${usage}`}</span>
+      ) : null}
+      {cost !== undefined ? (
+        <span title="Estimated from the provider's current per-token prices">
+          {` · ${formatCost(cost)}`}
+        </span>
+      ) : null}
+    </p>
   );
 }
 
@@ -169,14 +207,7 @@ export function MessageList({
                 </p>
               ) : null}
 
-              {message.role === 'assistant' && message.modelId ? (
-                <p className="text-xs text-fg-muted">
-                  {message.modelId}
-                  {message.usage?.outputTokens
-                    ? ` · ${message.usage.outputTokens} output tokens`
-                    : ''}
-                </p>
-              ) : null}
+              <MessageFooter message={message} />
             </article>
           ))}
 
