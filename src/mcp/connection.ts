@@ -10,6 +10,7 @@ import { mcpEndpointCorsRemedy } from './cors-remedy';
 import {
   canonicalHeaderName,
   createNegotiatingFetch,
+  type FetchLike,
   type NegotiatingFetch,
 } from './header-negotiation';
 import type { McpToolDescriptor, McpToolResult } from './tool-adapter';
@@ -54,7 +55,8 @@ import {
 } from './auth/browser';
 import { validateCallback, type CallbackParams } from './auth/validation';
 import { takePendingRequest } from './auth/token-store';
-import { unionScopes } from './auth/discovery';
+import { canonicalResourceUri, unionScopes } from './auth/discovery';
+import { createAuthorizingFetch } from './auth/authorizing-fetch';
 
 export type ConnectionState =
   'disconnected' | 'connecting' | 'needs-auth' | 'authorizing' | 'connected' | 'error';
@@ -97,14 +99,36 @@ const issuerStore = defineStore<Record<string, string>>({
   parse: safeParser(z.record(z.string(), z.string())),
 });
 
+/**
+ * Raised in place of the transport's bare `401`/`403` when a call fails because
+ * the connection's token is gone, spec §7.6.
+ *
+ * The wording is aimed at the model, which is what reads it: an unexplained
+ * rejection halfway through a turn — after the same tool worked moments earlier
+ * — invites the conclusion that someone changed the permissions, and that is
+ * what gets reported to the user. Naming the actual cause is the difference
+ * between "sign in again" and a wild goose chase through the server's ACLs.
+ */
 export class AuthorizationRequiredError extends Error {
-  constructor() {
-    super('The MCP server requires authorization.');
+  constructor(serverName?: string) {
+    super(
+      `${serverName ? `The connection to ${serverName}` : 'The MCP server connection'} is no longer authorized: its access token expired or was rejected, and it could not be renewed. This is an expired sign-in, not a change to what this account may access — the same data is reachable again after reconnecting the server in Settings.`
+    );
     this.name = 'AuthorizationRequiredError';
   }
 }
 
 const MAX_STEP_UP_ATTEMPTS = 3;
+
+/**
+ * How long a forced renewal is suppressed after the last one.
+ *
+ * A rejection that arrives moments after a successful refresh is about the
+ * token's authority, not its age, so refreshing again would only add a request
+ * to a failure that is already settled. Concurrent callers do not hit this —
+ * they share the in-flight refresh — so it only bounds genuinely repeated ones.
+ */
+const REFRESH_COOLDOWN_MS = 10_000;
 
 export class McpConnection {
   private client?: Client;
@@ -113,6 +137,9 @@ export class McpConnection {
   private stepUpAttempts = 0;
   private lastChallenge?: { header: string | null; scope?: string };
   private negotiating?: NegotiatingFetch;
+  /** Shared by every caller that wants a renewal, so only one is ever in flight. */
+  private refreshInFlight?: Promise<StoredTokens | undefined>;
+  private lastRefreshAt = 0;
 
   constructor(
     public config: McpServerConfig,
@@ -171,7 +198,7 @@ export class McpConnection {
   }
 
   /**
-   * Builds the transport, attaching a bearer token when one is held.
+   * Builds the transport.
    *
    * No stored session id is restored, deliberately. `Client.connect()` returns
    * early when the transport already carries one — it skips `initialize`
@@ -179,17 +206,32 @@ export class McpConnection {
    * `tools/list` right after it fails with "server does not support tools". A
    * fresh handshake on every page load costs one request and always works.
    *
-   * Every request goes through a negotiating fetch, so a CORS policy that
-   * rejects an optional MCP header degrades the connection instead of killing
-   * it (see header-negotiation.ts).
+   * The bearer token is deliberately *not* passed in `requestInit`. The SDK
+   * holds that object for the life of the transport, so a token put there is
+   * frozen at connect time and the connection dies the moment it expires —
+   * mid-turn, with the tool calls before it having succeeded. It is attached
+   * per request instead (see auth/authorizing-fetch.ts).
    */
-  private buildTransport(token?: string): StreamableHTTPClientTransport {
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-
+  private buildTransport(): StreamableHTTPClientTransport {
     return new StreamableHTTPClientTransport(new URL(this.config.url), {
-      requestInit: { headers },
-      fetch: this.negotiate(),
+      fetch: this.transportFetch(),
+    });
+  }
+
+  /**
+   * The fetch every transport request goes through: authorization outside,
+   * header negotiation inside.
+   *
+   * That order matters. Negotiation retries a request with MCP headers removed
+   * when the browser blocks them; it must retry the request as it was actually
+   * sent, token included, or a CORS retry would go out unauthenticated.
+   */
+  private transportFetch(): FetchLike {
+    const negotiating = this.negotiate();
+    return createAuthorizingFetch({
+      fetchFn: negotiating,
+      token: (force) => this.accessToken(force),
+      onRejected: (status, challenge) => this.onTokenRejected(status, challenge),
     });
   }
 
@@ -203,20 +245,73 @@ export class McpConnection {
     return negotiating;
   }
 
+  /**
+   * The token for the next request, renewed when it is due (spec §7.6).
+   *
+   * `force` is the recovery path for a rejection the local clock did not see
+   * coming: a token revoked early, a skewed clock, or a server that issued no
+   * `expires_in` to plan around. It returns the stored token unchanged when a
+   * renewal is impossible or too recent to be worth repeating, which is how the
+   * caller learns the rejection is final.
+   */
+  private async accessToken(force: boolean): Promise<string | undefined> {
+    const tokens = this.tokens();
+    if (!tokens) return undefined;
+
+    const now = Date.now();
+    const due = force || shouldRefresh(tokens, now) || tokensExpired(tokens, now);
+    const renewable =
+      tokens.refresh_token !== undefined &&
+      !(force && now - this.lastRefreshAt < REFRESH_COOLDOWN_MS);
+
+    const current = due && renewable ? ((await this.refresh(tokens)) ?? tokens) : tokens;
+
+    // An expired token no renewal could replace is worse than none: it draws
+    // the same rejection while making the request look authenticated, which is
+    // what turns "your login lapsed" into an unexplained permissions error.
+    return tokensExpired(current, Date.now()) ? undefined : current.access_token;
+  }
+
+  /** One renewal at a time, shared by everyone waiting on it. */
+  private refresh(tokens: StoredTokens): Promise<StoredTokens | undefined> {
+    // Without this, a turn firing several tool calls at once would start a
+    // refresh per call. Against an authorization server that rotates refresh
+    // tokens, the first to land invalidates the rest — so the recovery for one
+    // expired token becomes an unrecoverable session.
+    this.refreshInFlight ??= this.tryRefresh(tokens).finally(() => {
+      this.lastRefreshAt = Date.now();
+      this.refreshInFlight = undefined;
+    });
+    return this.refreshInFlight;
+  }
+
+  /**
+   * A rejection that survived a renewal. The token is spent, so the connection
+   * has to say so: left reporting itself connected, its tools stay in the set
+   * handed to the model and every one of them fails.
+   */
+  private onTokenRejected(status: number, challenge: string | null): void {
+    this.lastChallenge = { header: challenge };
+    this.emit({
+      state: 'needs-auth',
+      error: `The server rejected this connection's access token (HTTP ${status}). The sign-in has to be renewed.`,
+    });
+  }
+
   async connect(): Promise<void> {
     this.emit({ state: 'connecting', error: undefined, diagnosis: undefined });
 
-    let tokens = this.tokens();
-    if (tokens && shouldRefresh(tokens, Date.now()) && tokens.refresh_token) {
-      tokens = (await this.tryRefresh(tokens)) ?? tokens;
-    }
-    if (tokens && tokensExpired(tokens, Date.now())) {
-      const refreshed = tokens.refresh_token ? await this.tryRefresh(tokens) : undefined;
-      tokens = refreshed;
-    }
+    // Renewed up front rather than on the first request, so the snapshot
+    // published below describes the token the session actually runs on. A
+    // single call covers both "due for renewal" and "already expired"; the old
+    // two-step version could fire a second refresh with a refresh token the
+    // first attempt had already spent, turning one failed renewal into a dead
+    // session against any server that rotates them.
+    await this.accessToken(false);
+    const tokens = this.tokens();
 
     try {
-      await this.open(tokens?.access_token);
+      await this.open();
       await this.loadTools();
 
       const issuer = this.issuer();
@@ -238,21 +333,20 @@ export class McpConnection {
     }
   }
 
-  private async open(token?: string): Promise<void> {
+  private async open(): Promise<void> {
     // `capabilities` here describes what the *client* offers the server
     // (sampling, roots, elicitation). ctbx consumes tools; it offers none of
     // those yet, so the set is empty.
     const client = new Client({ name: 'ctbx', version: '0.1.0' }, { capabilities: {} });
 
     try {
-      await client.connect(this.buildTransport(token));
+      await client.connect(this.buildTransport());
       this.client = client;
     } catch (error) {
       // Deprecated HTTP+SSE servers reject the POST handshake (spec §6.1).
       if (isMethodNotAllowed(error)) {
         const transport = new SSEClientTransport(new URL(this.config.url), {
-          requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : {},
-          fetch: this.negotiate(),
+          fetch: this.transportFetch(),
         });
         await client.connect(transport);
         this.client = client;
@@ -505,7 +599,12 @@ export class McpConnection {
         metadata,
         client,
         redirectUri: redirectUri(),
-        resource: this.config.url,
+        // The same canonical form the authorization request and the code
+        // exchange used (RFC 8707). Sending the raw configured URL here instead
+        // asks for a token whose audience differs from the one that was granted
+        // whenever the two spellings differ — a trailing slash is enough — and
+        // the resource server rejects the renewal even though the login worked.
+        resource: canonicalResourceUri(this.config.url),
         fetchFn: this.fetchFn,
         ...(tokens.scope ? { scope: tokens.scope } : {}),
       });
@@ -521,6 +620,14 @@ export class McpConnection {
         ...(idToken ? { id_token: idToken } : {}),
       };
       writeTokens(this.config.id, issuer, result);
+      // The card shows the expiry it is counting down to, so a renewal that
+      // does not reach the snapshot leaves it displaying a time already past.
+      this.emit({
+        hasToken: true,
+        account: result.account,
+        ...(result.scope ? { grantedScopes: result.scope } : {}),
+        ...(result.expiresAt ? { tokenExpiresAt: result.expiresAt } : {}),
+      });
       return result;
     } catch {
       return undefined;
@@ -562,12 +669,26 @@ export class McpConnection {
 
   async callTool(name: string, args: unknown, signal?: AbortSignal): Promise<McpToolResult> {
     if (!this.client) throw new Error(`${this.config.name} is not connected.`);
-    const result = await this.client.callTool(
-      { name, arguments: (args ?? {}) as Record<string, unknown> },
-      undefined,
-      signal ? { signal } : undefined
-    );
-    return result as McpToolResult;
+    try {
+      const result = await this.client.callTool(
+        { name, arguments: (args ?? {}) as Record<string, unknown> },
+        undefined,
+        signal ? { signal } : undefined
+      );
+      return result as McpToolResult;
+    } catch (error) {
+      // `onTokenRejected` has already moved the connection to `needs-auth` by
+      // the time the transport's error surfaces here. Replacing the raw
+      // "Error POSTing to endpoint: 401 …" with what actually happened is the
+      // whole point: that string is what the model gets, and a rejection it
+      // cannot account for is one it will explain away.
+      // A stopped turn is not an authorization problem, and mislabelling it
+      // costs the caller its "generation stopped" handling.
+      if (this.snapshot.state === 'needs-auth' && !isAbortError(error)) {
+        throw new AuthorizationRequiredError(this.config.name);
+      }
+      throw error;
+    }
   }
 
   async disconnect(revoke = false): Promise<void> {
@@ -703,6 +824,10 @@ export function describeHandshakeOnlyFailure(
     '',
     `Transport error: ${errorText(error)}`,
   ].join('\n');
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
 }
 
 export function isUnauthorized(error: unknown): boolean {
