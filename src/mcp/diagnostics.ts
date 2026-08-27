@@ -48,6 +48,15 @@ export interface Diagnosis {
   message: string;
   /** Concrete fix, aimed at whoever operates the MCP server. */
   remedy?: string;
+  /**
+   * The raw `WWW-Authenticate` challenge, when the probe could read one.
+   *
+   * Carried rather than reduced to `wwwAuthenticateReadable` because it is the
+   * only place the `resource_metadata` hint is obtainable: the transport throws
+   * a `StreamableHTTPError`, which holds a status code and nothing else, so the
+   * probe's own response is the sole reader of this header.
+   */
+  challenge?: string;
 }
 
 export interface ProbeOutcome {
@@ -75,6 +84,8 @@ export interface ProbeOutcome {
   tokenPresent?: boolean;
   /** The `error` parameter from the challenge, e.g. `invalid_token`. */
   challengeError?: string | undefined;
+  /** The raw challenge header, passed through to the diagnosis. */
+  challenge?: string | undefined;
   /** The MCP server's canonical URI, for the audience remedy. */
   resource?: string;
   /** The authorization server issuer, for a server-specific remedy. */
@@ -103,6 +114,11 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
   const status = outcome.status ?? 0;
 
   if (status === 401 || status === 403) {
+    // Every branch below hands the challenge on: whichever way the rejection is
+    // described to the user, the authorization flow still needs the hint it
+    // carries.
+    const challenge = outcome.challenge ? { challenge: outcome.challenge } : {};
+
     // A token was sent and still bounced: this is no longer "needs auth".
     if (outcome.tokenPresent) {
       return {
@@ -112,6 +128,7 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
             ? 'The MCP server rejected the access token. Authorization completed, but the token is not accepted for this resource.'
             : `The MCP server rejected the access token (${outcome.challengeError}). Authorization completed, but the token is not accepted for this resource.`,
         remedy: tokenRejectedRemedy(outcome.resource ?? 'this MCP server', outcome.issuer),
+        ...challenge,
       };
     }
 
@@ -127,6 +144,7 @@ export function analyzeProbe(outcome: ProbeOutcome): Diagnosis {
     return {
       kind: 'needs-auth',
       message: 'The server requires authorization, and no access token is stored for it yet.',
+      ...challenge,
     };
   }
 
@@ -268,6 +286,7 @@ export async function diagnoseConnection(
       sessionIdReadable: response.headers.get('Mcp-Session-Id') !== null,
       tokenPresent: options.token !== undefined,
       challengeError: extractChallengeError(challenge),
+      ...(challenge !== null ? { challenge } : {}),
       resource: url,
       issuer: options.issuer,
       blockedRequestHeaders,

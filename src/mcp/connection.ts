@@ -385,6 +385,12 @@ export class McpConnection {
       ...(issuer ? { issuer } : {}),
     });
 
+    // The probe read a real response, so unlike the transport error it can carry
+    // the challenge. Preferred whenever it found one.
+    if (diagnosis.challenge) {
+      this.lastChallenge = { ...this.lastChallenge, header: diagnosis.challenge };
+    }
+
     if (diagnosis.kind === 'needs-auth' || diagnosis.kind === 'token-rejected') {
       this.emit({
         state: 'needs-auth',
@@ -428,6 +434,7 @@ export class McpConnection {
     this.emit({ state: 'authorizing', error: undefined });
 
     try {
+      await this.ensureChallenge();
       const resourceMetadata = await this.discoverResource();
 
       // A resource that names no authorization server is not a dead end: MCP's
@@ -470,6 +477,26 @@ export class McpConnection {
         state: 'needs-auth',
         error: error instanceof Error ? error.message : 'Authorization failed.',
       });
+    }
+  }
+
+  /**
+   * Spec §7.1 step 1: make an unauthenticated request so the 401 answers with
+   * the challenge that names the metadata.
+   *
+   * Connect failures capture this as a side effect, but authorizing does not
+   * imply one ever ran — a restored page offers the button with no attempt
+   * behind it. Without the hint, discovery has only the origin-root well-known
+   * URLs to go on, which a server mounted under a path prefix does not answer,
+   * so the flow ended by telling the operator to fix metadata they had already
+   * published. Probed unauthenticated on purpose: the challenge wanted here is
+   * "authorize me", not whatever a stored token provokes.
+   */
+  private async ensureChallenge(): Promise<void> {
+    if (this.lastChallenge?.header) return;
+    const diagnosis = await diagnoseConnection(this.config.url, this.fetchFn);
+    if (diagnosis.challenge) {
+      this.lastChallenge = { ...this.lastChallenge, header: diagnosis.challenge };
     }
   }
 
@@ -830,11 +857,21 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
 }
 
+/**
+ * Whether a transport failure was a 401.
+ *
+ * `code` is checked alongside `status` because that is the field the MCP SDK
+ * actually sets: `StreamableHTTPError` is constructed as `(code, message)`. Only
+ * matching on `status` left the text pattern below as the real test, and that
+ * pattern reads the server's response body — the SDK interpolates it into the
+ * message — so recognising a 401 came down to whether the body happened to
+ * contain the digits. An empty body, or a JSON `invalid_token` payload, did not.
+ */
 export function isUnauthorized(error: unknown): boolean {
   const text = errorText(error);
   if (/\b401\b|unauthorized/i.test(text)) return true;
-  const status = (error as { code?: number; status?: number })?.status;
-  return status === 401;
+  const record = error as { code?: number; status?: number } | null;
+  return record?.status === 401 || record?.code === 401;
 }
 
 export function isMethodNotAllowed(error: unknown): boolean {
