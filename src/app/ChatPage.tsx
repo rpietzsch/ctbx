@@ -9,10 +9,22 @@ import { configuredProviders, preferencesStore } from '@/config/stores';
 import { Button, ErrorNote, cx } from '@/ui/primitives';
 
 export function ChatPage() {
-  const { conversations, current, streaming, error, load, select, startNew, remove, send, stop } =
-    useChatStore();
+  const {
+    conversations,
+    current,
+    streaming,
+    error,
+    load,
+    select,
+    startNew,
+    remove,
+    rename,
+    send,
+    stop,
+  } = useChatStore();
   const [draft, setDraft] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [renaming, setRenaming] = useState<{ id: string; draft: string }>();
   // Read once at mount: setting this from inside the effect would cascade renders.
   const [hasProviders] = useState(() => configuredProviders().length > 0);
 
@@ -55,29 +67,70 @@ export function ChatPage() {
       <ul className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2">
         {conversations.map((conversation) => (
           <li key={conversation.id} className="group flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => {
-                void select(conversation.id);
-                setDrawerOpen(false);
-              }}
-              className={cx(
-                'min-w-0 flex-1 truncate rounded-lg px-2.5 py-1.5 text-left text-sm',
-                conversation.id === current?.id ? 'bg-surface-3' : 'hover:bg-surface-2'
-              )}
-            >
-              {conversation.title}
-            </button>
-            <button
-              type="button"
-              aria-label={`Delete ${conversation.title}`}
-              onClick={() => void remove(conversation.id)}
-              // Hover-reveal hides it permanently on a touch screen, where
-              // there is no hover — so it stays visible without a pointer.
-              className="rounded px-2 py-1.5 text-xs text-fg-muted md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
-            >
-              ✕
-            </button>
+            {renaming?.id === conversation.id ? (
+              <input
+                value={renaming.draft}
+                autoFocus
+                aria-label={`Name for ${conversation.title}`}
+                onChange={(event) =>
+                  setRenaming({ id: conversation.id, draft: event.target.value })
+                }
+                // Committing on blur as well as Enter means clicking away saves
+                // rather than silently discarding what was typed.
+                onBlur={() => {
+                  void rename(conversation.id, renaming.draft);
+                  setRenaming(undefined);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                  if (event.key === 'Escape') {
+                    setRenaming(undefined);
+                  }
+                }}
+                // A ring rather than a border: it paints outside the box, so
+                // the row keeps the exact height of the button it replaces and
+                // the list does not reflow while one item is being renamed.
+                className="min-w-0 flex-1 rounded-lg bg-surface px-2.5 py-1.5 text-sm ring-1 ring-accent"
+              />
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void select(conversation.id);
+                    setDrawerOpen(false);
+                  }}
+                  onDoubleClick={() =>
+                    setRenaming({ id: conversation.id, draft: conversation.title })
+                  }
+                  className={cx(
+                    'min-w-0 flex-1 truncate rounded-lg px-2.5 py-1.5 text-left text-sm',
+                    conversation.id === current?.id ? 'bg-surface-3' : 'hover:bg-surface-2'
+                  )}
+                >
+                  {conversation.title}
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Rename ${conversation.title}`}
+                  title="Rename"
+                  onClick={() => setRenaming({ id: conversation.id, draft: conversation.title })}
+                  className="rounded px-1 py-1.5 text-xs text-fg-muted md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
+                >
+                  ✎
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Delete ${conversation.title}`}
+                  onClick={() => void remove(conversation.id)}
+                  // Hover-reveal hides it permanently on a touch screen, where
+                  // there is no hover — so it stays visible without a pointer.
+                  className="rounded px-2 py-1.5 text-xs text-fg-muted md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
+                >
+                  ✕
+                </button>
+              </>
+            )}
           </li>
         ))}
       </ul>

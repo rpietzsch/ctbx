@@ -7,6 +7,7 @@ import { describeFailure } from '@/engine/errors';
 import {
   deleteConversation as dbDelete,
   deriveTitle,
+  titleFor,
   getConversation,
   listConversations,
   newConversation,
@@ -37,12 +38,14 @@ interface ChatState {
   setModel(providerId: ProviderId, modelId: string): Promise<void>;
   /** Pins the conversation to one OpenRouter endpoint; `undefined` unpins. */
   setEndpoint(endpointTag: string | undefined): Promise<void>;
+  /** Names a conversation. A blank name restores the derived one. */
+  rename(id: string, title: string): Promise<void>;
   send(text: string): Promise<void>;
   stop(): void;
 }
 
 function touch(conversation: StoredConversation): StoredConversation {
-  return { ...conversation, updatedAt: Date.now(), title: deriveTitle(conversation.messages) };
+  return { ...conversation, updatedAt: Date.now(), title: titleFor(conversation) };
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -122,6 +125,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       current: updated,
       conversations: state.conversations.map((c) => (c.id === updated.id ? updated : c)),
+    }));
+  },
+
+  async rename(id, title) {
+    const target =
+      get().current?.id === id ? get().current : get().conversations.find((c) => c.id === id);
+    if (!target) return;
+
+    // Clearing the name is how the user gets the automatic title back, so an
+    // empty input is a valid instruction rather than something to reject.
+    const trimmed = title.trim();
+    const { titleIsCustom: _was, ...rest } = target;
+    const updated: StoredConversation =
+      trimmed === ''
+        ? { ...rest, title: deriveTitle(target.messages) }
+        : { ...rest, title: trimmed, titleIsCustom: true };
+
+    await putConversation(updated);
+    set((state) => ({
+      conversations: state.conversations.map((c) => (c.id === id ? updated : c)),
+      ...(state.current?.id === id ? { current: updated } : {}),
     }));
   },
 

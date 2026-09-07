@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimateCost, formatCost, formatUsage, messageCost } from './usage';
+import { costTrail, estimateCost, formatCost, formatUsage, messageCost } from './usage';
 
 describe('formatUsage', () => {
   it('shows input and output side by side', () => {
@@ -103,5 +103,106 @@ describe('messageCost', () => {
 
   it('has nothing to show when neither the charge nor a rate is known', () => {
     expect(messageCost({ usage }, undefined)).toBeUndefined();
+  });
+});
+
+describe('costTrail', () => {
+  const pricing = { prompt: 0.00000004, completion: 0.00000015 };
+  const usage = { inputTokens: 1_000_000, outputTokens: 0 };
+
+  function turn(id: string, extra: Record<string, unknown> = {}) {
+    return {
+      id,
+      role: 'assistant' as const,
+      content: 'x',
+      createdAt: 0,
+      providerId: 'openrouter' as const,
+      modelId: 'm',
+      usage,
+      ...extra,
+    };
+  }
+
+  const priced = () => pricing;
+
+  it('accumulates in message order', () => {
+    const trail = costTrail(
+      [turn('a', { costUsd: 0.1 }), turn('b', { costUsd: 0.25 }), turn('c', { costUsd: 0.05 })],
+      priced
+    );
+    expect(trail.get('a')?.running.usd).toBeCloseTo(0.1, 10);
+    expect(trail.get('b')?.running.usd).toBeCloseTo(0.35, 10);
+    expect(trail.get('c')?.running.usd).toBeCloseTo(0.4, 10);
+  });
+
+  it('keeps the turn’s own price alongside the total', () => {
+    const trail = costTrail([turn('a', { costUsd: 0.1 }), turn('b', { costUsd: 0.25 })], priced);
+    expect(trail.get('b')?.own).toEqual({ usd: 0.25, exact: true });
+  });
+
+  it('ignores user messages', () => {
+    const trail = costTrail(
+      [
+        turn('a', { costUsd: 0.1 }),
+        { id: 'u', role: 'user' as const, content: 'hi', createdAt: 0 },
+        turn('b', { costUsd: 0.2 }),
+      ],
+      priced
+    );
+    expect(trail.has('u')).toBe(false);
+    expect(trail.get('b')?.running.usd).toBeCloseTo(0.3, 10);
+  });
+
+  it('marks the total estimated once any turn in it was estimated', () => {
+    const trail = costTrail([turn('a', { costUsd: 0.1 }), turn('b')], priced);
+    expect(trail.get('a')?.running.exact).toBe(true);
+    expect(trail.get('b')?.running.exact).toBe(false);
+  });
+
+  it('marks the total a lower bound once a turn could not be priced', () => {
+    // A pinned turn with no reported charge: its price is unknowable, so every
+    // later total is "at least" rather than exact.
+    const trail = costTrail(
+      [
+        turn('a', { costUsd: 0.1 }),
+        turn('b', { endpointTag: 'cerebras/fp16' }),
+        turn('c', { costUsd: 0.2 }),
+      ],
+      priced
+    );
+    expect(trail.get('a')?.running.complete).toBe(true);
+    expect(trail.get('b')?.own).toBeUndefined();
+    expect(trail.get('b')?.running.complete).toBe(false);
+    expect(trail.get('c')?.running.usd).toBeCloseTo(0.3, 10);
+    expect(trail.get('c')?.running.complete).toBe(false);
+  });
+
+  it('does not let an aborted turn poison the total', () => {
+    // No usage means no measurable generation — unlike a priced-but-unpriceable
+    // turn, it says nothing about what is missing.
+    const trail = costTrail(
+      [turn('a', { costUsd: 0.1 }), turn('b', { usage: undefined }), turn('c', { costUsd: 0.2 })],
+      priced
+    );
+    expect(trail.get('c')?.running.complete).toBe(true);
+  });
+
+  it('carries a lower bound forward once set', () => {
+    const trail = costTrail(
+      [turn('a', { endpointTag: 'x' }), turn('b', { costUsd: 0.2 }), turn('c', { costUsd: 0.1 })],
+      priced
+    );
+    expect(trail.get('c')?.running.complete).toBe(false);
+  });
+
+  it('counts nothing for a turn that failed before it billed', () => {
+    // `$0 total` would claim the conversation was free; it is unmeasured.
+    const trail = costTrail([turn('a', { usage: undefined })], () => undefined);
+    expect(trail.get('a')).toEqual({ running: { usd: 0, turns: 0, exact: true, complete: true } });
+  });
+
+  it('counts a genuinely free turn, so its zero total is still reported', () => {
+    const trail = costTrail([turn('a', { costUsd: 0 }), turn('b', { costUsd: 0 })], priced);
+    expect(trail.get('b')?.running).toEqual({ usd: 0, turns: 2, exact: true, complete: true });
   });
 });

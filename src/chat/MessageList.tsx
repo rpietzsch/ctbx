@@ -5,7 +5,7 @@ import { Badge, cx } from '@/ui/primitives';
 import { modelCacheStore } from '@/providers/registry';
 import { useStore } from '@/storage/useStore';
 import { formatToolResult, renderMarkdown } from './markdown';
-import { formatCost, formatUsage, messageCost } from './usage';
+import { costTrail, formatCost, formatUsage, type TurnCost } from './usage';
 
 function MarkdownBlock({ source }: { source: string }) {
   const html = useMemo(() => renderMarkdown(source), [source]);
@@ -34,15 +34,19 @@ function MarkdownBlock({ source }: { source: string }) {
  * shows tokens alone once its model leaves the provider's list — or once it was
  * pinned to an endpoint the list cannot price. See `messageCost`.
  */
-function MessageFooter({ message }: { message: StoredMessage }) {
-  const modelCache = useStore(modelCacheStore);
+function MessageFooter({ message, cost }: { message: StoredMessage; cost?: TurnCost }) {
   if (message.role !== 'assistant' || !message.modelId) return null;
 
   const usage = formatUsage(message.usage);
-  const pricing = message.providerId
-    ? modelCache[message.providerId]?.models.find((model) => model.id === message.modelId)?.pricing
-    : undefined;
-  const cost = messageCost(message, pricing);
+  const own = cost?.own;
+  const running = cost?.running;
+  /*
+    The running total is only worth its width once it says something the turn's
+    own price does not: on the first priced turn the two are the same number
+    twice, and before any turn has been priced at all a `$0` total would claim
+    the conversation was free rather than unmeasured.
+  */
+  const showRunning = running !== undefined && (running.turns > 1 || !running.complete);
 
   return (
     <p className="text-xs text-fg-muted">
@@ -61,16 +65,31 @@ function MessageFooter({ message }: { message: StoredMessage }) {
       {usage ? (
         <span title="Totals for the whole turn, including every tool step">{` · ${usage}`}</span>
       ) : null}
-      {cost ? (
+      {own ? (
         <span
           title={
-            cost.exact
+            own.exact
               ? 'Charged by the provider for this turn, across every tool step.'
               : "Estimated from the provider's current per-token prices."
           }
         >
-          {` · ${formatCost(cost.usd)}`}
-          {cost.exact ? '' : '*'}
+          {` · ${formatCost(own.usd)}`}
+          {own.exact ? '' : '*'}
+        </span>
+      ) : null}
+      {showRunning ? (
+        <span
+          title={[
+            'This conversation up to and including this turn.',
+            running.complete ? undefined : 'At least — an earlier turn could not be priced.',
+            running.exact ? undefined : '* includes estimated turns.',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        >
+          {` · ${running.complete ? '' : '≥'}${formatCost(running.usd)}`}
+          {running.exact ? '' : '*'}
+          {' total'}
         </span>
       ) : null}
     </p>
@@ -133,6 +152,19 @@ export function MessageList({
   messages: StoredMessage[];
   streaming: boolean;
 }) {
+  const modelCache = useStore(modelCacheStore);
+  // One pass for the whole transcript: each footer needs the sum of everything
+  // before it, which per-message would be quadratic.
+  const costs = useMemo(
+    () =>
+      costTrail(messages, (message) =>
+        message.providerId
+          ? modelCache[message.providerId]?.models.find((model) => model.id === message.modelId)
+              ?.pricing
+          : undefined
+      ),
+    [messages, modelCache]
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   /*
    * Whether the view is following new output. A ref rather than state: it is
@@ -230,7 +262,7 @@ export function MessageList({
                 </p>
               ) : null}
 
-              <MessageFooter message={message} />
+              <MessageFooter message={message} cost={costs.get(message.id)} />
             </article>
           ))}
 

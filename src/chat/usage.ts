@@ -77,6 +77,70 @@ export function messageCost(
   return estimated === undefined ? undefined : { usd: estimated, exact: false };
 }
 
+export interface RunningCost {
+  usd: number;
+  /**
+   * How many turns the sum covers. Zero means nothing has been priced yet, and
+   * a total of `$0` would claim the conversation was free when it is really
+   * unknown — a turn that failed before it billed anything is the common case.
+   */
+  turns: number;
+  /** Every turn in the sum was priced by the provider, none estimated. */
+  exact: boolean;
+  /**
+   * No turn up to here was left unpriced. When false the real total is higher
+   * than `usd`, and the figure has to be presented as a lower bound.
+   */
+  complete: boolean;
+}
+
+export interface TurnCost {
+  /** This turn alone. Absent when it cannot be priced at all. */
+  own?: MessageCost;
+  /** This turn plus every priced turn before it. */
+  running: RunningCost;
+}
+
+/**
+ * Per-turn and running costs for a whole conversation, in one pass.
+ *
+ * A turn counts as unpriced — and so makes every later total a lower bound —
+ * only when it reported token usage but no price. A turn with no usage at all
+ * never produced a measurable generation, so it is passed over rather than
+ * poisoning the total: an aborted turn should not permanently mark the
+ * conversation's cost as unknown.
+ *
+ * Keyed by message id, because the footer renders one message at a time and
+ * recomputing the prefix sum per message would be quadratic in the transcript.
+ */
+export function costTrail(
+  messages: readonly StoredMessage[],
+  pricingOf: (message: StoredMessage) => ModelInfo['pricing']
+): Map<string, TurnCost> {
+  const trail = new Map<string, TurnCost>();
+  let usd = 0;
+  let turns = 0;
+  let exact = true;
+  let complete = true;
+
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+
+    const own = messageCost(message, pricingOf(message));
+    if (own) {
+      usd += own.usd;
+      turns += 1;
+      exact &&= own.exact;
+    } else if (message.usage !== undefined) {
+      complete = false;
+    }
+
+    trail.set(message.id, { ...(own ? { own } : {}), running: { usd, turns, exact, complete } });
+  }
+
+  return trail;
+}
+
 /**
  * Costs span four orders of magnitude here — a short answer on a cheap model is
  * a fraction of a cent, a long tool-driven turn on a frontier model is dollars —

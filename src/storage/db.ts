@@ -54,6 +54,12 @@ export interface StoredConversation {
   providerId?: ProviderId;
   modelId?: string;
   /**
+   * The user named this conversation, so the title must survive every later
+   * message. Without it `touch` re-derives the title from the first user
+   * message on every turn and the name would not last one reply.
+   */
+  titleIsCustom?: boolean;
+  /**
    * OpenRouter endpoint this conversation is pinned to (`ModelEndpoint.tag`).
    * Absent means the router chooses, which is the default. Cleared whenever
    * the model changes — a tag names an endpoint serving one specific model.
@@ -117,6 +123,19 @@ export function deriveTitle(messages: StoredMessage[]): string {
   const text = first.content.trim().replace(/\s+/g, ' ');
   if (text === '') return 'New conversation';
   return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+}
+
+/**
+ * The title to store after a conversation changes.
+ *
+ * A name the user typed has to survive every later message; the derived title
+ * is refreshed from the first user message, which is what makes a brand-new
+ * conversation stop reading as "New conversation" once it has content.
+ */
+export function titleFor(
+  conversation: Pick<StoredConversation, 'title' | 'titleIsCustom' | 'messages'>
+): string {
+  return conversation.titleIsCustom ? conversation.title : deriveTitle(conversation.messages);
 }
 
 export function newId(): string {
