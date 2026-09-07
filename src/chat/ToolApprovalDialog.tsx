@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { approvalGate } from '@/state/chat';
+import { approvalGate, useChatStore } from '@/state/chat';
 import { Button } from '@/ui/primitives';
 import { formatToolResult } from './markdown';
 
@@ -14,6 +14,17 @@ export function ToolApprovalDialog() {
     () => approvalGate.current(),
     () => undefined
   );
+
+  // A reply keeps running while the reader browses elsewhere, so the request
+  // can arrive over a conversation that did not ask for it. Read as separate
+  // scalars rather than one object: this dialog must not re-render per token.
+  const streamingId = useChatStore((state) => state.streamingId);
+  const currentId = useChatStore((state) => state.current?.id);
+  const streamingTitle = useChatStore(
+    (state) => state.conversations.find((c) => c.id === state.streamingId)?.title
+  );
+  const askedFrom =
+    streamingId !== undefined && streamingId !== currentId ? streamingTitle : undefined;
 
   if (!pending) return null;
 
@@ -48,6 +59,12 @@ export function ToolApprovalDialog() {
             <dt className="w-20 shrink-0 text-fg-muted">Tool</dt>
             <dd className="font-mono text-xs">{pending.toolName}</dd>
           </div>
+          {askedFrom ? (
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-fg-muted">Asked in</dt>
+              <dd className="min-w-0 truncate font-medium">{askedFrom}</dd>
+            </div>
+          ) : null}
         </dl>
 
         <p className="mt-3 text-xs text-fg-muted">Arguments</p>

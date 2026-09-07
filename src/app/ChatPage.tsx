@@ -13,6 +13,7 @@ export function ChatPage() {
     conversations,
     current,
     streaming,
+    streamingId,
     error,
     load,
     select,
@@ -33,6 +34,14 @@ export function ChatPage() {
     mcpManager.sync();
     void mcpManager.resumeRedirectAuthorization().then(() => mcpManager.connectAutoStart());
   }, [load]);
+
+  // A reply keeps arriving while its conversation sits in the background, so
+  // "is a reply arriving" and "is a reply arriving *here*" are two questions:
+  // the transcript and the Stop button answer the second, the composer the
+  // first — one turn runs at a time, wherever the reader happens to be.
+  const receiving = streaming && streamingId === current?.id;
+  const elsewhere =
+    streaming && !receiving ? conversations.find((c) => c.id === streamingId) : undefined;
 
   const submit = () => {
     const text = draft.trim();
@@ -104,11 +113,28 @@ export function ChatPage() {
                     setRenaming({ id: conversation.id, draft: conversation.title })
                   }
                   className={cx(
-                    'min-w-0 flex-1 truncate rounded-lg px-2.5 py-1.5 text-left text-sm',
+                    'flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-sm',
                     conversation.id === current?.id ? 'bg-surface-3' : 'hover:bg-surface-2'
                   )}
                 >
-                  {conversation.title}
+                  {/*
+                    The slot is there on every row, filled or not, so that a
+                    reply landing in one conversation does not shift the titles
+                    of all the others sideways.
+                  */}
+                  <span
+                    aria-hidden
+                    className={cx(
+                      'h-1.5 w-1.5 shrink-0 rounded-full',
+                      streaming && conversation.id === streamingId
+                        ? 'animate-pulse bg-accent'
+                        : 'bg-transparent'
+                    )}
+                  />
+                  <span className="min-w-0 truncate">{conversation.title}</span>
+                  {streaming && conversation.id === streamingId ? (
+                    <span className="sr-only">(reply arriving)</span>
+                  ) : null}
                 </button>
                 <button
                   type="button"
@@ -169,7 +195,7 @@ export function ChatPage() {
           output (see follow-scroll.ts).
         */}
         <div className="min-h-0 flex-1">
-          <MessageList messages={current?.messages ?? []} streaming={streaming} />
+          <MessageList messages={current?.messages ?? []} streaming={receiving} />
         </div>
 
         <div
@@ -182,6 +208,20 @@ export function ChatPage() {
         >
           <div className="mx-auto max-w-3xl space-y-2">
             {error ? <ErrorNote>{error}</ErrorNote> : null}
+
+            {elsewhere ? (
+              <p className="text-xs text-fg-muted">
+                A reply is still arriving in{' '}
+                <button
+                  type="button"
+                  className="underline"
+                  onClick={() => void select(elsewhere.id)}
+                >
+                  {elsewhere.title}
+                </button>
+                . It will keep going while you read this one; sending waits for it to finish.
+              </p>
+            ) : null}
 
             <div className="flex items-center gap-2">
               <Button
@@ -209,12 +249,27 @@ export function ChatPage() {
                 placeholder="Send a message…"
                 className="max-h-48 min-h-[3rem] flex-1 resize-y rounded-lg border border-border bg-surface px-3 py-2 text-sm"
               />
-              {streaming ? (
+              {receiving ? (
                 <Button variant="secondary" onClick={stop}>
+                  {/*
+                    Once the text pauses — a slow first token, a long tool step —
+                    this button is the only thing on screen still saying the
+                    provider is working. Reduced motion freezes it to a static
+                    ring (see index.css), which still reads as busy.
+                  */}
+                  <span
+                    aria-hidden
+                    className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent opacity-70"
+                  />
                   Stop
                 </Button>
               ) : (
-                <Button variant="primary" onClick={submit} disabled={draft.trim() === ''}>
+                <Button
+                  variant="primary"
+                  onClick={submit}
+                  disabled={draft.trim() === '' || streaming}
+                  {...(elsewhere ? { title: `Waiting for the reply in ${elsewhere.title}.` } : {})}
+                >
                   Send
                 </Button>
               )}

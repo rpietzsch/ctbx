@@ -68,9 +68,12 @@ _Exit criterion: a user pastes an OpenRouter key and holds a real streaming conv
 | M1-5 | ~      | M    | **Conversation persistence.** IndexedDB store, sidebar, restore on load. No automated coverage of the IndexedDB layer.      |
 | M1-6 | x      | S    | **Error surfaces.** Nine distinct failure kinds, each with its own message and retryability. 17 tests.                      |
 | M1-7 | x      | S    | **First-run screen.** Shown when no provider key is configured; routes to Providers.                                        |
+| M1-8 | x      | S    | **Replies continue in the background.** Reading another conversation mid-reply neither interrupts it nor snaps the view back, and a rename or model switch made while one arrives survives it. 6 store tests. |
+| M1-9 | x      | S    | **Picker opens on the model in use**, centred and highlighted, and rendered even when it sits past the row cap. 4 component tests. |
 
 **Gaps:** M1-4 and M1-5 need a component test for the streaming render path and a fake-IndexedDB
-test for conversation round-tripping.
+test for conversation round-tripping. The store side of streaming is now covered by
+`src/state/chat.test.ts`, against doubles for the engine and the database.
 
 ---
 

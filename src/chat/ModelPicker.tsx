@@ -21,6 +21,13 @@ import {
  * A plain <select> is unusable here: OpenRouter alone lists 400+ models, so the
  * list has to be filtered by typing rather than scrolled.
  */
+
+/**
+ * How many rows are rendered at once. Several hundred two-line rows is a lot of
+ * DOM for a panel meant to be searched rather than scrolled — but see `limit`,
+ * which stretches this far enough to reach the model in use.
+ */
+const RENDERED_ROWS = 100;
 export function ModelPicker() {
   const { current, setModel } = useChatStore();
   const [models, setModels] = useState<PickableModel[]>([]);
@@ -29,10 +36,12 @@ export function ModelPicker() {
   const [refreshError, setRefreshError] = useState<string>();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [highlight, setHighlight] = useState(0);
+  /** An explicit move of the highlight — arrow keys or the pointer. */
+  const [moved, setMoved] = useState<number>();
 
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const preferences = useStore(preferencesStore);
   const toolsOnly = preferences.modelPickerToolsOnly;
   const serversConnected = mcpManager.hasConnectedServers();
@@ -96,8 +105,6 @@ export function ModelPicker() {
   const visible = useMemo(() => filterModels(models, toolsOnly), [models, toolsOnly]);
   const hiddenCount = toolsOnly ? models.length - visible.length : 0;
   const results = useMemo(() => searchModels(visible, query), [visible, query]);
-  const grouped = useMemo(() => groupByProvider(results.slice(0, 100)), [results]);
-  const flatResults = useMemo(() => grouped.flatMap(([, list]) => list), [grouped]);
 
   const selected =
     current?.providerId && current.modelId
@@ -112,19 +119,66 @@ export function ModelPicker() {
         ? 'Loading models…'
         : 'Choose a model';
 
+  /*
+    The row cap is stretched to reach the model in use. It is routinely past
+    row 100 — OpenRouter lists over 350, in its own order — and a picker that
+    renders everything except what you are currently using is worse than one
+    that renders a few hundred rows on the rare occasion it has to.
+  */
+  const selectedPosition = results.findIndex((model) => model.key === selected?.key);
+  const limit = Math.max(RENDERED_ROWS, selectedPosition + 1);
+  const grouped = useMemo(() => groupByProvider(results.slice(0, limit)), [results, limit]);
+  const flatResults = useMemo(() => grouped.flatMap(([, list]) => list), [grouped]);
+
+  // Row order as a lookup, rather than an indexOf per row: the list is long
+  // enough now that scanning it once per row is real work on every keystroke.
+  const positions = useMemo(
+    () => new Map(flatResults.map((model, index) => [model.key, index])),
+    [flatResults]
+  );
+
+  /** Where the model in use sits in the list, or -1 when it is filtered out. */
+  const selectedIndex = selected === undefined ? -1 : (positions.get(selected.key) ?? -1);
+
+  /*
+    Opening the picker lands on the model in use rather than on whatever heads
+    a list of several hundred: that is the row the reader opened it to see, and
+    the one the arrow keys should move away from. Searching is the exception —
+    a query wants its best match first.
+
+    Derived rather than stored, so that it follows the list instead of chasing
+    it: the models arrive after the panel is already open, and the tool filter
+    reorders them under it. Only an explicit move pins the highlight, and that
+    pin is dropped whenever the list itself changes meaning.
+  */
+  const defaultHighlight = query === '' && selectedIndex >= 0 ? selectedIndex : 0;
+  const highlight = moved ?? defaultHighlight;
+
+  // Keeps the highlighted row in view: it starts somewhere down a long list,
+  // and arrow keys would otherwise walk it off the bottom of the panel. The
+  // opening jump is centred — landing hard against an edge reads as the end of
+  // the list — while a move is nudged only as far as it has to be.
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelector(`[data-option-index="${highlight}"]`)
+      ?.scrollIntoView({ block: moved === undefined ? 'center' : 'nearest' });
+  }, [open, highlight, moved]);
+
   const choose = (model: PickableModel) => {
     void setModel(model.providerId as ProviderId, model.id);
     setOpen(false);
     setQuery('');
+    setMoved(undefined);
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === 'ArrowDown') {
       event.preventDefault();
-      setHighlight((index) => Math.min(index + 1, flatResults.length - 1));
+      setMoved(Math.min(highlight + 1, flatResults.length - 1));
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
-      setHighlight((index) => Math.max(index - 1, 0));
+      setMoved(Math.max(highlight - 1, 0));
     } else if (event.key === 'Enter') {
       event.preventDefault();
       const model = flatResults[highlight];
@@ -136,7 +190,10 @@ export function ModelPicker() {
     <div ref={containerRef} className="relative min-w-0">
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          setMoved(undefined);
+          setOpen((value) => !value);
+        }}
         aria-haspopup="listbox"
         aria-expanded={open}
         className="flex max-w-[18rem] items-center gap-1.5 truncate rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs"
@@ -172,7 +229,7 @@ export function ModelPicker() {
               value={query}
               onChange={(event) => {
                 setQuery(event.target.value);
-                setHighlight(0);
+                setMoved(undefined);
               }}
               onKeyDown={onKeyDown}
               placeholder="Search models…"
@@ -193,14 +250,18 @@ export function ModelPicker() {
               checked={toolsOnly}
               onChange={(event) => {
                 setModelPickerToolsOnly(event.target.checked);
-                setHighlight(0);
+                setMoved(undefined);
               }}
             />
             <span className="flex-1">Only models that support tool calling</span>
             {hiddenCount > 0 ? <span>{hiddenCount} hidden</span> : null}
           </label>
 
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain" role="listbox">
+          <div
+            ref={listRef}
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+            role="listbox"
+          >
             {refreshError ? <p className="px-3 py-2 text-xs text-warn">{refreshError}</p> : null}
 
             {flatResults.length === 0 ? (
@@ -218,7 +279,7 @@ export function ModelPicker() {
                     {providerLabel}
                   </p>
                   {list.map((model) => {
-                    const index = flatResults.indexOf(model);
+                    const index = positions.get(model.key) ?? 0;
                     const facts = [
                       { text: formatContextWindow(model.contextWindow), title: 'Context window' },
                       {
@@ -234,8 +295,9 @@ export function ModelPicker() {
                         key={model.key}
                         type="button"
                         role="option"
+                        data-option-index={index}
                         aria-selected={model.key === selected?.key}
-                        onMouseEnter={() => setHighlight(index)}
+                        onMouseEnter={() => setMoved(index)}
                         onClick={() => choose(model)}
                         className={cx(
                           'flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left',
@@ -263,9 +325,9 @@ export function ModelPicker() {
               ))
             )}
 
-            {results.length > 100 ? (
+            {results.length > limit ? (
               <p className="px-3 py-2 text-center text-xs text-fg-muted">
-                {results.length - 100} more — keep typing to narrow the list.
+                {results.length - limit} more — keep typing to narrow the list.
               </p>
             ) : null}
           </div>
