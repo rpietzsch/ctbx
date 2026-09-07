@@ -51,6 +51,12 @@ export const preferencesSchema = z.object({
   defaultProviderId: providerIdSchema.optional(),
   defaultModelId: z.string().optional(),
   /**
+   * OpenRouter endpoint the default model is pinned to, as `ModelEndpoint.tag`.
+   * Only meaningful together with `defaultModelId`: a pin is per model, since
+   * the set of endpoints serving one model has nothing to do with the next.
+   */
+  defaultEndpointTag: z.string().optional(),
+  /**
    * Upper bound on tool-call round trips per turn (spec §6.4).
    *
    * A step is one model generation plus the tools it asked for, so this bounds

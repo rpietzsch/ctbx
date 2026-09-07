@@ -5,7 +5,7 @@ import { Badge, cx } from '@/ui/primitives';
 import { modelCacheStore } from '@/providers/registry';
 import { useStore } from '@/storage/useStore';
 import { formatToolResult, renderMarkdown } from './markdown';
-import { estimateCost, formatCost, formatUsage } from './usage';
+import { formatCost, formatUsage, messageCost } from './usage';
 
 function MarkdownBlock({ source }: { source: string }) {
   const html = useMemo(() => renderMarkdown(source), [source]);
@@ -25,9 +25,14 @@ function MarkdownBlock({ source }: { source: string }) {
  * transcript plus the tool schemas, so it grows far faster than the visible
  * answer does — and the price tag turns that into the number that matters.
  *
- * Prices come from the cached model list rather than the message, so the whole
- * transcript is costed retroactively. The flip side is that a turn goes back to
- * showing tokens alone once its model leaves the provider's list.
+ * The route is named whenever the provider reports it, because on OpenRouter
+ * the model id alone does not identify what answered: one model is served by
+ * many providers at different prices and speeds, and `Auto` picks per request.
+ *
+ * Prices prefer the provider's own charge, recorded with the message. Falling
+ * back to the cached model list costs the transcript retroactively, so a turn
+ * shows tokens alone once its model leaves the provider's list — or once it was
+ * pinned to an endpoint the list cannot price. See `messageCost`.
  */
 function MessageFooter({ message }: { message: StoredMessage }) {
   const modelCache = useStore(modelCacheStore);
@@ -37,17 +42,35 @@ function MessageFooter({ message }: { message: StoredMessage }) {
   const pricing = message.providerId
     ? modelCache[message.providerId]?.models.find((model) => model.id === message.modelId)?.pricing
     : undefined;
-  const cost = estimateCost(message.usage, pricing);
+  const cost = messageCost(message, pricing);
 
   return (
     <p className="text-xs text-fg-muted">
       {message.modelId}
+      {message.route ? (
+        <span
+          title={
+            message.endpointTag
+              ? `Pinned to ${message.endpointTag}, and served by ${message.route}.`
+              : `Routed to ${message.route} for this turn.`
+          }
+        >
+          {` · ${message.route}`}
+        </span>
+      ) : null}
       {usage ? (
         <span title="Totals for the whole turn, including every tool step">{` · ${usage}`}</span>
       ) : null}
-      {cost !== undefined ? (
-        <span title="Estimated from the provider's current per-token prices">
-          {` · ${formatCost(cost)}`}
+      {cost ? (
+        <span
+          title={
+            cost.exact
+              ? 'Charged by the provider for this turn, across every tool step.'
+              : "Estimated from the provider's current per-token prices."
+          }
+        >
+          {` · ${formatCost(cost.usd)}`}
+          {cost.exact ? '' : '*'}
         </span>
       ) : null}
     </p>

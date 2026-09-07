@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimateCost, formatCost, formatUsage } from './usage';
+import { estimateCost, formatCost, formatUsage, messageCost } from './usage';
 
 describe('formatUsage', () => {
   it('shows input and output side by side', () => {
@@ -63,5 +63,45 @@ describe('formatCost', () => {
   it('never prints a nonzero cost as nothing', () => {
     expect(formatCost(0.00000004)).toBe('<$0.0001');
     expect(formatCost(0)).toBe('$0');
+  });
+});
+
+describe('messageCost', () => {
+  // openai/gpt-oss-120b: the default route is cheap, Cerebras is not.
+  const listPricing = { prompt: 0.00000004, completion: 0.00000015 };
+  const usage = { inputTokens: 577_567, outputTokens: 8_155 };
+
+  it('prefers what the provider actually charged', () => {
+    expect(messageCost({ usage, costUsd: 0.5893 }, listPricing)).toEqual({
+      usd: 0.5893,
+      exact: true,
+    });
+  });
+
+  it('reports a free turn rather than dropping the tag', () => {
+    expect(messageCost({ usage, costUsd: 0 }, listPricing)).toEqual({ usd: 0, exact: true });
+  });
+
+  it('falls back to the list price for an unpinned turn, marked inexact', () => {
+    const cost = messageCost({ usage }, listPricing);
+    expect(cost?.exact).toBe(false);
+    expect(cost?.usd).toBeCloseTo(577_567 * 0.00000004 + 8_155 * 0.00000015, 10);
+  });
+
+  it('refuses to price a pinned turn from the default route’s rate', () => {
+    // The list says $0.04/M in; Cerebras charges $0.99/M. Printing the former
+    // would be a different endpoint's bill, not an approximation of this one.
+    expect(messageCost({ usage, endpointTag: 'cerebras' }, listPricing)).toBeUndefined();
+  });
+
+  it('still prices a pinned turn when the provider reported the charge', () => {
+    expect(messageCost({ usage, endpointTag: 'cerebras', costUsd: 0.583 }, listPricing)).toEqual({
+      usd: 0.583,
+      exact: true,
+    });
+  });
+
+  it('has nothing to show when neither the charge nor a rate is known', () => {
+    expect(messageCost({ usage }, undefined)).toBeUndefined();
   });
 });

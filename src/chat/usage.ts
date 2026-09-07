@@ -46,6 +46,37 @@ export function estimateCost(
   return inputTokens * prompt + outputTokens * completion;
 }
 
+export interface MessageCost {
+  usd: number;
+  /** Charged by the provider, as opposed to derived from published rates. */
+  exact: boolean;
+}
+
+/**
+ * The price to show under a turn, and whether it can be trusted as exact.
+ *
+ * The provider's own figure wins whenever there is one: it already reflects the
+ * endpoint that served the turn and any cache discount, neither of which the
+ * published per-token rates capture.
+ *
+ * Without it, the cached model price is used — except for a turn that was
+ * pinned to a specific endpoint, where that price is known to be the wrong one.
+ * The model list publishes the default route's rate, and a pinned endpoint can
+ * charge many times it; on `openai/gpt-oss-120b` the spread runs from $0.04 to
+ * $0.99 per million input tokens. Printing the default rate for a pinned turn
+ * would not be an approximation, it would be a different endpoint's bill.
+ */
+export function messageCost(
+  message: Pick<StoredMessage, 'usage' | 'costUsd' | 'endpointTag'>,
+  pricing: ModelInfo['pricing']
+): MessageCost | undefined {
+  if (message.costUsd !== undefined) return { usd: message.costUsd, exact: true };
+  if (message.endpointTag !== undefined) return undefined;
+
+  const estimated = estimateCost(message.usage, pricing);
+  return estimated === undefined ? undefined : { usd: estimated, exact: false };
+}
+
 /**
  * Costs span four orders of magnitude here — a short answer on a cheap model is
  * a fraction of a cent, a long tool-driven turn on a frontier model is dollars —

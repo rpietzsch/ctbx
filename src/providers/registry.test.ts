@@ -145,3 +145,66 @@ describe('getDefinition', () => {
     expect(getDefinition('anthropic').browserNote).toMatch(/browser/i);
   });
 });
+
+describe('resolveModel routing', () => {
+  const config = { providerId: 'openrouter' as const, apiKey: 'sk-or-test', enabled: true };
+
+  /** The SDK keeps the settings it was built with, which is what we assert on. */
+  function settingsOf(model: unknown): {
+    provider?: { order?: string[]; allow_fallbacks?: boolean };
+  } {
+    return (model as { settings: { provider?: { order?: string[]; allow_fallbacks?: boolean } } })
+      .settings;
+  }
+
+  it('sends no routing preference when nothing is pinned', () => {
+    const model = openrouterDefinition.createModel(config, 'z-ai/glm-5.3');
+    expect(settingsOf(model).provider).toBeUndefined();
+  });
+
+  it('pins the endpoint and disables fallbacks, so the price cannot change under it', () => {
+    const model = openrouterDefinition.createModel(config, 'z-ai/glm-5.3', {
+      endpointTag: 'google-vertex/europe',
+    });
+    expect(settingsOf(model).provider).toEqual({
+      order: ['google-vertex/europe'],
+      allow_fallbacks: false,
+    });
+  });
+
+  it('ignores an empty pin rather than sending an unroutable order', () => {
+    const model = openrouterDefinition.createModel(config, 'z-ai/glm-5.3', { endpointTag: '' });
+    expect(settingsOf(model).provider).toBeUndefined();
+  });
+});
+
+describe('model cache versioning', () => {
+  it('discards a cache written before models carried a canonical slug', () => {
+    // Exactly what an install from the previous build has on disk: valid
+    // against the current schema, but missing the field the speed lookup needs.
+    localStorage.setItem(
+      modelCacheStore.storageKey,
+      JSON.stringify({
+        v: 1,
+        d: {
+          openrouter: {
+            fetchedAt: NOW,
+            models: [{ id: 'a/one', label: 'One', supportsTools: true }],
+          },
+        },
+      })
+    );
+
+    expect(modelCacheStore.get()).toEqual({});
+  });
+
+  it('keeps a cache written by the current version', () => {
+    modelCacheStore.set({
+      openrouter: {
+        fetchedAt: NOW,
+        models: [{ id: 'a/one', label: 'One', supportsTools: true, canonicalSlug: 'a/one-2026' }],
+      },
+    });
+    expect(modelCacheStore.get().openrouter?.models[0]?.canonicalSlug).toBe('a/one-2026');
+  });
+});

@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  endpointQualifiers,
   formatContextWindow,
   formatPricePerMillion,
   formatPricing,
   formatPricingTitle,
+  formatSpeedTitle,
+  formatThroughput,
+  formatUptime,
   groupByProvider,
   modelKey,
   parseModelKey,
@@ -165,5 +169,78 @@ describe('groupByProvider', () => {
     const groups = groupByProvider(searchModels(MODELS, 'gpt-4o'));
     expect(groups[0]?.[0]).toBe('OpenAI');
     expect(groups.map(([label]) => label)).toEqual(['OpenAI', 'OpenRouter']);
+  });
+});
+
+describe('formatUptime', () => {
+  it('trims the reported precision to one decimal', () => {
+    expect(formatUptime(78.21933123284886)).toBe('78.2% up');
+  });
+
+  it('does not round up to a claim of perfect uptime', () => {
+    expect(formatUptime(99.94)).toBe('99.9% up');
+    expect(formatUptime(99.99115063266656)).toBe('100% up');
+  });
+
+  it('has nothing to say when uptime is not reported', () => {
+    expect(formatUptime(undefined)).toBeUndefined();
+    expect(formatUptime(-1)).toBeUndefined();
+  });
+});
+
+describe('endpointQualifiers', () => {
+  const base = { providerName: 'Google', degraded: false, supportsTools: true };
+
+  it('returns the region that distinguishes sibling endpoints', () => {
+    expect(endpointQualifiers({ ...base, tag: 'google-vertex/europe' })).toEqual(['europe']);
+  });
+
+  it('has no qualifier for a bare provider slug', () => {
+    expect(endpointQualifiers({ ...base, tag: 'wafer' })).toEqual([]);
+  });
+
+  it('states the quantization even when the tag does not carry it', () => {
+    expect(endpointQualifiers({ ...base, tag: 'wafer', quantization: 'bf16' })).toEqual(['bf16']);
+  });
+
+  it('does not say fp8 twice when the tag suffix is the quantization', () => {
+    expect(endpointQualifiers({ ...base, tag: 'reka/fp8', quantization: 'fp8' })).toEqual(['fp8']);
+  });
+
+  it('keeps region and quantization apart when they differ', () => {
+    expect(
+      endpointQualifiers({ ...base, tag: 'google-vertex/us-east5', quantization: 'bf16' })
+    ).toEqual(['us-east5', 'bf16']);
+  });
+});
+
+describe('formatThroughput', () => {
+  it('rounds to whole tokens per second', () => {
+    expect(formatThroughput(38.6)).toBe('39 tps');
+  });
+
+  it('has nothing to say without a measurement', () => {
+    expect(formatThroughput(undefined)).toBeUndefined();
+    expect(formatThroughput(0)).toBeUndefined();
+  });
+});
+
+describe('formatSpeedTitle', () => {
+  const base = { tag: 'reka/fp8', providerName: 'Reka', degraded: false, supportsTools: true };
+
+  it('names the sample the medians came from', () => {
+    expect(formatSpeedTitle({ ...base, throughput: 38, latency: 3285, sampleCount: 341 })).toBe(
+      'Median 38 tokens/s, median latency 3.3s, over 341 requests in the last 30 minutes.'
+    );
+  });
+
+  it('still describes the window when the sample size is missing', () => {
+    expect(formatSpeedTitle({ ...base, throughput: 38 })).toBe(
+      'Median 38 tokens/s, over the last 30 minutes.'
+    );
+  });
+
+  it('says nothing at all when nothing was measured', () => {
+    expect(formatSpeedTitle(base)).toBeUndefined();
   });
 });

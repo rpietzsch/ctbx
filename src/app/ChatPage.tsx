@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { MessageList } from '@/chat/MessageList';
 import { ToolApprovalDialog } from '@/chat/ToolApprovalDialog';
 import { ModelPicker } from '@/chat/ModelPicker';
+import { EndpointPicker } from '@/chat/EndpointPicker';
 import { mcpManager, useChatStore } from '@/state/chat';
 import { configuredProviders, preferencesStore } from '@/config/stores';
 import { Button, ErrorNote, cx } from '@/ui/primitives';
@@ -139,6 +140,7 @@ export function ChatPage() {
                 ☰
               </Button>
               <ModelPicker />
+              <EndpointPicker />
               <span className="min-w-0 flex-1 text-right">
                 <McpStatus />
               </span>

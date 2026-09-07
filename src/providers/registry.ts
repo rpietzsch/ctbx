@@ -4,7 +4,12 @@ import { defineStore } from '@/storage/local';
 import { safeParser, type ProviderId } from '@/config/schema';
 import { getProviderConfig } from '@/config/stores';
 import { PROVIDER_DEFINITIONS } from './definitions';
-import { ProviderRequestError, type ModelInfo, type ProviderDefinition } from './types';
+import {
+  ProviderRequestError,
+  type ModelInfo,
+  type ModelRouting,
+  type ProviderDefinition,
+} from './types';
 
 const definitionsById = new Map<ProviderId, ProviderDefinition>(
   PROVIDER_DEFINITIONS.map((definition) => [definition.id, definition])
@@ -25,12 +30,16 @@ export function allDefinitions(): ProviderDefinition[] {
  * allowed to matter; everything downstream sees a plain `LanguageModel`
  * (spec §5.1).
  */
-export function resolveModel(providerId: ProviderId, modelId: string): LanguageModel {
+export function resolveModel(
+  providerId: ProviderId,
+  modelId: string,
+  routing?: ModelRouting
+): LanguageModel {
   const config = getProviderConfig(providerId);
   if (!config || config.apiKey === '') {
     throw new ProviderRequestError(`No API key configured for ${getDefinition(providerId).label}.`);
   }
-  return getDefinition(providerId).createModel(config, modelId);
+  return getDefinition(providerId).createModel(config, modelId, routing);
 }
 
 // ---------------------------------------------------------------- model cache
@@ -41,6 +50,7 @@ const modelInfoSchema = z.object({
   id: z.string(),
   label: z.string(),
   contextWindow: z.number().optional(),
+  canonicalSlug: z.string().optional(),
   pricing: z
     .object({ prompt: z.number().optional(), completion: z.number().optional() })
     .optional(),
@@ -56,7 +66,16 @@ type ModelCache = z.infer<typeof modelCacheSchema>;
 
 export const modelCacheStore = defineStore<ModelCache>({
   name: 'model-cache',
-  version: 1,
+  /**
+   * v1 → v2: entries gained `canonicalSlug`, which the endpoint picker needs to
+   * look up per-endpoint speed.
+   *
+   * The field is optional, so a v1 entry still parses — it just silently has no
+   * slug, and every endpoint shows a blank throughput column until the 24-hour
+   * TTL expires. Discarding the cache instead is the whole point of the bump:
+   * with no `migrate`, an old envelope is dropped and the next read refetches.
+   */
+  version: 2,
   label: 'Cached provider model lists',
   fallback: () => ({}),
   parse: safeParser(modelCacheSchema),

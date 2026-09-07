@@ -7,12 +7,30 @@ import {
   parseAnthropicModels,
   parseGoogleModels,
   parseOpenAIModels,
+  parseOpenRouterEndpointStats,
+  parseOpenRouterEndpoints,
   parseOpenRouterModels,
+  type EndpointStats,
 } from './parse';
-import { ProviderRequestError, type ModelInfo, type ProviderDefinition } from './types';
+import {
+  ProviderRequestError,
+  type ModelEndpoint,
+  type ModelInfo,
+  type ProviderDefinition,
+} from './types';
 
 /** Attribution headers OpenRouter uses for its app leaderboards. */
 export const APP_TITLE = 'ctbx';
+
+/**
+ * Endpoint listing always goes to OpenRouter itself, never to `baseUrl`: a
+ * gateway override points at an OpenAI-compatible proxy, which has no notion
+ * of OpenRouter's provider endpoints.
+ */
+const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
+
+/** Undocumented, but unauthenticated and CORS-open. See `fetchEndpointStats`. */
+const OPENROUTER_STATS_URL = 'https://openrouter.ai/api/frontend/v1/stats/endpoint';
 
 function appUrl(): string {
   if (typeof globalThis.location === 'undefined') return 'https://rpietzsch.github.io/ctbx/';
@@ -67,20 +85,78 @@ export const openrouterDefinition: ProviderDefinition = {
     { id: 'anthropic/claude-sonnet-4', label: 'Claude Sonnet 4', supportsTools: true },
     { id: 'openai/gpt-4o', label: 'GPT-4o', supportsTools: true },
   ],
-  createModel(config, modelId) {
+  createModel(config, modelId, routing) {
     const openrouter = createOpenRouter({
       apiKey: config.apiKey,
       ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
       headers: { 'HTTP-Referer': appUrl(), 'X-Title': APP_TITLE },
     });
-    return openrouter.chat(modelId);
+    /*
+      Pinning one endpoint is the only way an OpenRouter price is knowable in
+      advance: without it the router picks among providers whose prices differ
+      by up to 9x for the same model, and the number shown in the picker is
+      only the default route's. `allow_fallbacks: false` is what makes the pin
+      binding — left at its default the router silently uses another provider,
+      at another price, whenever the pinned one is busy.
+    */
+    return openrouter.chat(modelId, {
+      /*
+        Ask for usage accounting. OpenRouter then reports what the generation
+        actually cost and which provider served it, which is the only reliable
+        way to price a turn: the model list publishes the default route's rate,
+        and the endpoint that answers may charge several times that.
+      */
+      usage: { include: true },
+      ...(routing?.endpointTag
+        ? { provider: { order: [routing.endpointTag], allow_fallbacks: false } }
+        : {}),
+    });
   },
   async listModels(config, signal) {
     // Unauthenticated: the picker works before a key is entered (spec §5.2).
     const base = config.baseUrl ?? 'https://openrouter.ai/api/v1';
     return parseOpenRouterModels(await fetchJson(`${base}/models`, { signal }));
   },
+  async listEndpoints(modelId, options): Promise<ModelEndpoint[]> {
+    const signal = options?.signal;
+    // Same unauthenticated host as the model list, and CORS-open likewise.
+    const [endpoints, stats] = await Promise.all([
+      fetchJson(`${OPENROUTER_API_BASE}/models/${modelId}/endpoints`, { signal }).then(
+        parseOpenRouterEndpoints
+      ),
+      fetchEndpointStats(options?.canonicalSlug, signal),
+    ]);
+
+    return endpoints.map((endpoint) => ({ ...endpoint, ...stats.get(endpoint.tag) }));
+  },
 };
+
+/**
+ * Speed figures for one model's endpoints, or nothing.
+ *
+ * Every failure here is swallowed on purpose. This reads the API OpenRouter's
+ * own model pages use rather than its documented one — the documented list
+ * declares `throughput_last_30m` and returns null for it on every endpoint —
+ * so it can change shape or disappear without notice. When it does, the
+ * endpoint picker loses a column and keeps working; it must never lose the
+ * endpoints themselves.
+ *
+ * The lookup is keyed by the versioned slug: passing the plain model id
+ * returns HTTP 200 with an empty list, which is why an absent `canonicalSlug`
+ * skips the request rather than making a useless one.
+ */
+async function fetchEndpointStats(
+  canonicalSlug: string | undefined,
+  signal: AbortSignal | undefined
+): Promise<Map<string, EndpointStats>> {
+  if (canonicalSlug === undefined || canonicalSlug === '') return new Map();
+  try {
+    const url = `${OPENROUTER_STATS_URL}?permaslug=${encodeURIComponent(canonicalSlug)}`;
+    return parseOpenRouterEndpointStats(await fetchJson(url, { signal }));
+  } catch {
+    return new Map();
+  }
+}
 
 export const openaiDefinition: ProviderDefinition = {
   id: 'openai',

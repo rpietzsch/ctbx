@@ -30,6 +30,20 @@ export interface StoredMessage {
   toolCalls?: StoredToolCall[];
   error?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
+  /**
+   * What the provider charged for this turn, when it reports it. Exact, and
+   * therefore preferred over the estimate — it already accounts for whichever
+   * endpoint served the turn and for any cache discount.
+   */
+  costUsd?: number;
+  /** The provider that served the turn, e.g. `Cerebras`. */
+  route?: string;
+  /**
+   * The endpoint the turn was pinned to, if any. Kept so the footer knows the
+   * cached model price does *not* apply: a pinned endpoint charges its own
+   * rate, which the model list never reports.
+   */
+  endpointTag?: string;
 }
 
 export interface StoredConversation {
@@ -39,6 +53,12 @@ export interface StoredConversation {
   updatedAt: number;
   providerId?: ProviderId;
   modelId?: string;
+  /**
+   * OpenRouter endpoint this conversation is pinned to (`ModelEndpoint.tag`).
+   * Absent means the router chooses, which is the default. Cleared whenever
+   * the model changes — a tag names an endpoint serving one specific model.
+   */
+  endpointTag?: string;
   messages: StoredMessage[];
 }
 

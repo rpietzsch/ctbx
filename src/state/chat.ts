@@ -35,6 +35,8 @@ interface ChatState {
   startNew(): Promise<void>;
   remove(id: string): Promise<void>;
   setModel(providerId: ProviderId, modelId: string): Promise<void>;
+  /** Pins the conversation to one OpenRouter endpoint; `undefined` unpins. */
+  setEndpoint(endpointTag: string | undefined): Promise<void>;
   send(text: string): Promise<void>;
   stop(): void;
 }
@@ -63,9 +65,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const conversation = newConversation();
     const previous = get().current;
     // Carry the model choice forward; re-picking it every time is tedious.
+    // The endpoint pin rides along with it: it belongs to that exact model, so
+    // it stays valid for exactly as long as the model does.
     if (previous?.providerId && previous.modelId) {
       conversation.providerId = previous.providerId;
       conversation.modelId = previous.modelId;
+      if (previous.endpointTag !== undefined) conversation.endpointTag = previous.endpointTag;
     }
     await putConversation(conversation);
     set((state) => ({
@@ -88,13 +93,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
   async setModel(providerId, modelId) {
     const current = get().current;
     if (!current) return;
-    const updated = { ...current, providerId, modelId };
+    // A pin names an endpoint serving one model, so changing the model has to
+    // drop it. Keeping it would either fail the request or, worse, silently
+    // route to a provider that happens to share the tag.
+    const { endpointTag: _dropped, ...rest } = current;
+    const updated = { ...rest, providerId, modelId };
     await putConversation(updated);
-    preferencesStore.update((preferences) => ({
-      ...preferences,
-      defaultProviderId: providerId,
-      defaultModelId: modelId,
+    preferencesStore.update((preferences) => {
+      const { defaultEndpointTag: _cleared, ...others } = preferences;
+      return { ...others, defaultProviderId: providerId, defaultModelId: modelId };
+    });
+    set((state) => ({
+      current: updated,
+      conversations: state.conversations.map((c) => (c.id === updated.id ? updated : c)),
     }));
+  },
+
+  async setEndpoint(endpointTag) {
+    const current = get().current;
+    if (!current) return;
+    const { endpointTag: _previous, ...rest } = current;
+    const updated = endpointTag === undefined ? rest : { ...rest, endpointTag };
+    await putConversation(updated);
+    preferencesStore.update((preferences) => {
+      const { defaultEndpointTag: _cleared, ...others } = preferences;
+      return endpointTag === undefined ? others : { ...others, defaultEndpointTag: endpointTag };
+    });
     set((state) => ({
       current: updated,
       conversations: state.conversations.map((c) => (c.id === updated.id ? updated : c)),
@@ -146,7 +170,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
 
     try {
-      const model = resolveModel(conversation.providerId, conversation.modelId);
+      const model = resolveModel(conversation.providerId, conversation.modelId, {
+        ...(conversation.endpointTag === undefined
+          ? {}
+          : { endpointTag: conversation.endpointTag }),
+      });
       const preferences = preferencesStore.get();
 
       const result = await runTurn({
@@ -176,8 +204,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (result.failure) {
         update((message) => ({ ...message, error: result.failure!.message }));
         set({ error: result.failure.message });
-      } else if (result.usage) {
-        update((message) => ({ ...message, usage: result.usage }));
+      } else if (result.usage || result.costUsd !== undefined || result.route) {
+        // The pin is recorded alongside the accounting because it is what tells
+        // the footer whether the cached model price may be used as a fallback.
+        update((message) => ({
+          ...message,
+          ...(result.usage ? { usage: result.usage } : {}),
+          ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
+          ...(result.route === undefined ? {} : { route: result.route }),
+          ...(conversation.endpointTag === undefined
+            ? {}
+            : { endpointTag: conversation.endpointTag }),
+        }));
       }
     } catch (error) {
       const failure = describeFailure(error);

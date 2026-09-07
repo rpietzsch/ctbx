@@ -1,5 +1,5 @@
 import type { ProviderId } from '@/config/schema';
-import type { ModelInfo } from '@/providers/types';
+import type { ModelEndpoint, ModelInfo } from '@/providers/types';
 
 export interface PickableModel extends ModelInfo {
   providerId: ProviderId;
@@ -56,6 +56,61 @@ export function formatContextWindow(tokens: number | undefined): string | undefi
     return `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 === 0 ? 0 : 1)}M ctx`;
   if (tokens >= 1000) return `${Math.round(tokens / 1000)}K ctx`;
   return `${tokens} ctx`;
+}
+
+/**
+ * Uptime over the last day, as OpenRouter reports it (a percentage, not a
+ * fraction). Rounded to one decimal: the raw value carries fourteen.
+ */
+export function formatUptime(percent: number | undefined): string | undefined {
+  if (percent === undefined || percent < 0) return undefined;
+  return `${percent >= 99.95 ? '100' : percent.toFixed(1)}% up`;
+}
+
+/**
+ * Median output speed. Whole tokens per second: the extra precision would
+ * imply the figure is steadier than a 30-minute median of a shared endpoint.
+ */
+export function formatThroughput(tokensPerSecond: number | undefined): string | undefined {
+  if (tokensPerSecond === undefined || tokensPerSecond <= 0) return undefined;
+  return `${Math.round(tokensPerSecond)} tps`;
+}
+
+/**
+ * Spells the speed figures out for the hover title, sample size included — a
+ * median over a handful of requests is noise, and the reader deserves to know
+ * which one they are looking at.
+ */
+export function formatSpeedTitle(endpoint: ModelEndpoint): string | undefined {
+  const parts: string[] = [];
+  if (endpoint.throughput !== undefined) {
+    parts.push(`Median ${Math.round(endpoint.throughput)} tokens/s`);
+  }
+  if (endpoint.latency !== undefined) {
+    parts.push(`median latency ${(endpoint.latency / 1000).toFixed(1)}s`);
+  }
+  if (parts.length === 0) return undefined;
+  const sample =
+    endpoint.sampleCount === undefined
+      ? 'over the last 30 minutes'
+      : `over ${endpoint.sampleCount} request${endpoint.sampleCount === 1 ? '' : 's'} in the last 30 minutes`;
+  return `${parts.join(', ')}, ${sample}.`;
+}
+
+/**
+ * What distinguishes an endpoint from its siblings, in the order OpenRouter
+ * names them: the region or variant from the tag, then the weight
+ * quantization. `google-vertex/europe` yields `europe`; `reka/fp8` yields one
+ * `fp8` rather than two, since the tag suffix and the quantization are the
+ * same fact there. A bare `wafer` yields nothing.
+ */
+export function endpointQualifiers(endpoint: ModelEndpoint): string[] {
+  const slash = endpoint.tag.indexOf('/');
+  const suffix = slash === -1 ? '' : endpoint.tag.slice(slash + 1);
+  const qualifiers = [suffix, endpoint.quantization ?? ''].filter(
+    (qualifier, index, all) => qualifier !== '' && all.indexOf(qualifier) === index
+  );
+  return qualifiers;
 }
 
 export function modelKey(providerId: ProviderId, modelId: string): string {
